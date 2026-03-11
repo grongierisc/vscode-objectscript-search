@@ -1,0 +1,97 @@
+{
+  "name": "vscode-objectscript-search",
+  "displayName": "ObjectScript Search",
+  "description": "Server-side search for InterSystems IRIS ObjectScript code",
+  "version": "0.1.0",
+  "publisher": "grongierisc",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/grongierisc/vscode-objectscript-search"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "intersystems",
+    "objectscript",
+    "iris",
+    "search"
+  ],
+  "extensionDependencies": [
+    "intersystems-community.servermanager"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension",
+  "contributes": {
+    "views": {
+      "intersystems-community_servermanager": [
+        {
+          "type": "webview",
+          "id": "ObjectScriptSearch",
+          "name": "Search",
+          "contextualTitle": "ObjectScript Search",
+          "icon": "media/search.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "vscode-objectscript-search.focus",
+        "title": "Open Search",
+        "category": "ObjectScript"
+      }
+    ],
+    "configuration": {
+      "title": "ObjectScript Search",
+      "properties": {
+        "objectscriptSearch.maxResults": {
+          "type": "number",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum number of search results to return per search."
+        },
+        "objectscriptSearch.includeSystem": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include system (%-prefixed) classes and routines in search results."
+        },
+        "objectscriptSearch.allowSelfSignedCertificates": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow connections to IRIS servers with self-signed SSL/TLS certificates."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "webpack",
+    "watch": "webpack --watch",
+    "package": "webpack --mode production --devtool hidden-source-map",
+    "compile-tests": "tsc -p tsconfig.test.json",
+    "pretest": "npm run compile-tests",
+    "test": "node ./out/test/runTest.js",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.0.0",
+    "@types/sinon": "^21.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/test-electron": "^2.5.2",
+    "mocha": "^11.7.5",
+    "sinon": "^21.0.2",
+    "ts-loader": "^9.4.0",
+    "typescript": "^5.0.0",
+    "webpack": "^5.80.0",
+    "webpack-cli": "^5.0.0"
+  },
+  "dependencies": {
+    "@intersystems-community/intersystems-servermanager": "^3.10.2"
+  }
+}
