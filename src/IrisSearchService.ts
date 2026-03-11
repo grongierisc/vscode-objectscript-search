@@ -182,27 +182,64 @@ export function isCategoryMatch(cat: string, categories: DocCategory[]): boolean
   });
 }
 
+// ---------------------------------------------------------------------------
+// Injectable transport — replaced in unit tests via _setTransport()
+// ---------------------------------------------------------------------------
+
+export interface RequestCapture {
+  method: string;
+  path: string;
+  hostname: string;
+  port: number;
+  headers: Record<string, string>;
+  body?: string;
+}
+
+export type TransportFn = (
+  capture: RequestCapture,
+) => Promise<AtelierQueryResponse>;
+
+let _transport: TransportFn | undefined;
+
+/** @internal Inject a fake transport for unit tests. Pass undefined to reset. */
+export function _setTransport(fn: TransportFn | undefined): void {
+  _transport = fn;
+}
+
 function makeRequest(
   connection: IConnection,
   method: string,
   path: string,
   body?: string,
 ): Promise<AtelierQueryResponse> {
+  const allowSelfSigned = vscode.workspace
+    .getConfiguration('objectscriptSearch')
+    .get<boolean>('allowSelfSignedCertificates', false);
+
+  const auth = Buffer.from(`${connection.username}:${connection.password}`).toString('base64');
+  const headers: Record<string, string> = {
+    Authorization: `Basic ${auth}`,
+    Accept: 'application/json',
+  };
+  if (body) {
+    headers['Content-Type'] = 'application/json';
+    headers['Content-Length'] = Buffer.byteLength(body).toString();
+  }
+
+  const capture: RequestCapture = {
+    method,
+    path,
+    hostname: connection.host,
+    port: connection.port,
+    headers,
+    body,
+  };
+
+  if (_transport) {
+    return _transport(capture);
+  }
+
   return new Promise((resolve, reject) => {
-    const allowSelfSigned = vscode.workspace
-      .getConfiguration('objectscriptSearch')
-      .get<boolean>('allowSelfSignedCertificates', false);
-
-    const auth = Buffer.from(`${connection.username}:${connection.password}`).toString('base64');
-    const headers: Record<string, string> = {
-      Authorization: `Basic ${auth}`,
-      Accept: 'application/json',
-    };
-    if (body) {
-      headers['Content-Type'] = 'application/json';
-      headers['Content-Length'] = Buffer.byteLength(body).toString();
-    }
-
     const options: http.RequestOptions & https.RequestOptions = {
       hostname: connection.host,
       port: connection.port,
@@ -250,7 +287,7 @@ interface AtelierDoc {
   db?: string;
 }
 
-interface AtelierQueryResponse {
+export interface AtelierQueryResponse {
   result?: {
     content?: unknown[];
   };
