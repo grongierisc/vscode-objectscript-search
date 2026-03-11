@@ -1,0 +1,1 @@
+# vscode-objectscript-search
