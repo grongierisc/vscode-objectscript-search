@@ -34,7 +34,7 @@ export async function searchByName(
   );
 
   const data = await makeRequest(connection, 'GET', path);
-  const docs = (data?.result?.content ?? []) as AtelierDoc[];
+  const docs = ((data?.result as { content?: unknown[] })?.content ?? []) as AtelierDoc[];
 
   return docs
     .filter((doc) => isCategoryMatch(doc.cat, categories))
@@ -42,120 +42,78 @@ export async function searchByName(
     .map((doc) => ({ name: doc.name, category: doc.cat }));
 }
 
-/** Search class/routine content via Atelier SQL query endpoint. */
+/** Search file content via the Atelier v2 search endpoint. */
 export async function searchByContent(
   connection: IConnection,
   options: ISearchOptions,
 ): Promise<ISearchResult[]> {
   const { query, categories, maxResults, includeSystem } = options;
-  const results: ISearchResult[] = [];
 
-  const wantClasses =
-    categories.length === 0 || categories.some((c) => c === 'CLS' || c === 'PKG');
-  const wantRoutines =
-    categories.length === 0 || categories.some((c) => ['RTN', 'MAC', 'INT'].includes(c));
-  const wantIncludes = categories.length === 0 || categories.includes('INC');
+  const masks = buildFileMasks(categories);
+  if (masks.length === 0) return [];
 
-  if (wantClasses && results.length < maxResults) {
-    const clsResults = await searchClassContent(
-      connection,
-      query,
-      maxResults - results.length,
-      includeSystem,
-    );
-    results.push(...clsResults);
+  const sysParam = includeSystem ? '1' : '0';
+  const path = buildPath(
+    connection,
+    `/action/search?query=${encodeURIComponent(query)}&files=${encodeURIComponent(masks.join(','))}&regex=0&sys=${sysParam}&max=${maxResults}`,
+    2,
+  );
+
+  try {
+    const data = await makeRequest(connection, 'POST', path);
+    const docs = (data?.result ?? []) as SearchDoc[];
+    return docs
+      .flatMap((doc) =>
+        doc.matches.map((match) => ({
+          name: doc.doc,
+          category: categoryFromDocName(doc.doc),
+          context: match.member
+            ? `${match.member}: ${match.text}`
+            : `${match.line ?? ''}: ${match.text}`,
+        }))
+      )
+      .slice(0, maxResults);
+  } catch (err) {
+    console.error('[ObjectScript Search] Content search failed:', err);
+    return [];
   }
-
-  if ((wantRoutines || wantIncludes) && results.length < maxResults) {
-    const rtnResults = await searchRoutineContent(
-      connection,
-      query,
-      maxResults - results.length,
-      wantIncludes,
-      includeSystem,
-    );
-    results.push(...rtnResults);
-  }
-
-  return results;
 }
 
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 
-async function searchClassContent(
-  connection: IConnection,
-  query: string,
-  limit: number,
-  includeSystem: boolean,
-): Promise<ISearchResult[]> {
-  const systemFilter = includeSystem ? '' : `AND m.parent NOT %STARTSWITH '%'`;
-  // Use parameterized SQL to prevent injection
-  const sql = `
-    SELECT TOP ? m.parent As ClassName, m.Name As MemberName, m.Implementation As Content
-    FROM %Dictionary.MethodDefinition m
-    WHERE m.Implementation [ ?
-    ${systemFilter}
-  `;
+/** Build Atelier file masks from category filter. */
+function buildFileMasks(categories: DocCategory[]): string[] {
+  if (categories.length === 0) return ['*.cls', '*.mac', '*.int', '*.inc'];
+  const masks = new Set<string>();
+  for (const cat of categories) {
+    if (cat === 'CLS' || cat === 'PKG') masks.add('*.cls');
+    if (cat === 'RTN' || cat === 'MAC') masks.add('*.mac');
+    if (cat === 'RTN' || cat === 'INT') masks.add('*.int');
+    if (cat === 'INC') masks.add('*.inc');
+    if (cat === 'CSP') masks.add('*.csp');
+  }
+  return [...masks];
+}
 
-  try {
-    const data = await runQuery(connection, sql, [limit, query]);
-    return ((data?.result?.content ?? []) as ClassContentRow[]).map((row) => ({
-      name: `${row.ClassName}.cls`,
-      category: 'CLS',
-      context: `${row.MemberName}: ${extractSnippet(row.Content ?? '', query)}`,
-    }));
-  } catch (err) {
-    console.error('[ObjectScript Search] Class content search failed:', err);
-    return [];
+/** Derive our category code from a document name's extension. */
+function categoryFromDocName(docName: string): string {
+  const ext = docName.split('.').pop()?.toLowerCase() ?? '';
+  switch (ext) {
+    case 'cls': return 'CLS';
+    case 'mac': return 'MAC';
+    case 'int': return 'INT';
+    case 'inc': return 'INC';
+    case 'csp': return 'CSP';
+    default:    return 'OTH';
   }
 }
 
-async function searchRoutineContent(
-  connection: IConnection,
-  query: string,
-  limit: number,
-  includeIncludes: boolean,
-  includeSystem: boolean,
-): Promise<ISearchResult[]> {
-  const typeList = includeIncludes ? "'MAC','INT','INC'" : "'MAC','INT'";
-  const systemFilter = includeSystem ? '' : `AND r.name NOT %STARTSWITH '%'`;
-  // %Library.RoutineIndex stores name without extension; type is separate column
-  const sql = `
-    SELECT TOP ? r.name, r.type
-    FROM %Library.RoutineIndex r
-    WHERE r.name [ ?
-    AND r.type IN (${typeList})
-    ${systemFilter}
-  `;
-
-  try {
-    const data = await runQuery(connection, sql, [limit, query]);
-    return ((data?.result?.content ?? []) as RoutineRow[]).map((row) => ({
-      name: `${row.name}.${(row.type ?? 'mac').toLowerCase()}`,
-      category: (row.type ?? 'MAC').toUpperCase(),
-    }));
-  } catch (err) {
-    console.error('[ObjectScript Search] Routine content search failed:', err);
-    return [];
-  }
-}
-
-export function buildPath(connection: IConnection, suffix: string): string {
+export function buildPath(connection: IConnection, suffix: string, version = 1): string {
   const prefix = connection.pathPrefix?.replace(/\/$/, '') ?? '';
   const ns = encodeURIComponent(connection.namespace);
-  return `${prefix}/api/atelier/v1/${ns}${suffix}`;
-}
-
-async function runQuery(
-  connection: IConnection,
-  query: string,
-  parameters: unknown[],
-): Promise<AtelierQueryResponse> {
-  const path = buildPath(connection, '/action/query');
-  const body = JSON.stringify({ query, parameters });
-  return makeRequest(connection, 'POST', path, body);
+  return `${prefix}/api/atelier/v${version}/${ns}${suffix}`;
 }
 
 export function extractSnippet(content: string, query: string): string {
@@ -288,18 +246,18 @@ interface AtelierDoc {
 }
 
 export interface AtelierQueryResponse {
-  result?: {
-    content?: unknown[];
-  };
+  // v1 endpoints: result = { content: unknown[] }
+  // v2 search endpoint: result = SearchDoc[]
+  result?: unknown;
 }
 
-interface ClassContentRow {
-  ClassName: string;
-  MemberName: string;
-  Content?: string;
+interface SearchDoc {
+  doc: string;
+  matches: SearchMatch[];
 }
 
-interface RoutineRow {
-  name: string;
-  type?: string;
+interface SearchMatch {
+  member?: string;
+  line?: string;
+  text: string;
 }

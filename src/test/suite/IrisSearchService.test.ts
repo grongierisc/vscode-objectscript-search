@@ -334,53 +334,71 @@ suite('IrisSearchService > searchByContent', () => {
     _setTransport(undefined);
   });
 
-  test('makes two POST requests when no category filter (classes + routines)', async () => {
-    const calls = installTransport({ result: { content: [] } });
+  test('makes a single POST request regardless of category filter', async () => {
+    const calls = installTransport({ result: [] });
     await searchByContent(BASE_CONN, {
       query: 'findme', searchType: 'content', categories: [], maxResults: 10, includeSystem: false,
     });
-    assert.strictEqual(calls.length, 2);
-  });
-
-  test('makes only one request when only CLS selected', async () => {
-    const calls = installTransport({ result: { content: [] } });
-    await searchByContent(BASE_CONN, {
-      query: 'findme', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
-    });
     assert.strictEqual(calls.length, 1);
   });
 
-  test('makes only one request when only RTN selected', async () => {
-    const calls = installTransport({ result: { content: [] } });
-    await searchByContent(BASE_CONN, {
-      query: 'findme', searchType: 'content', categories: ['RTN'], maxResults: 10, includeSystem: false,
-    });
-    assert.strictEqual(calls.length, 1);
-  });
-
-  test('uses POST method for query requests', async () => {
-    const calls = installTransport({ result: { content: [] } });
+  test('uses POST method', async () => {
+    const calls = installTransport({ result: [] });
     await searchByContent(BASE_CONN, {
       query: 'q', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
     });
     assert.strictEqual(calls[0].capture.method, 'POST');
   });
 
-  test('sends query string in request body', async () => {
-    const calls = installTransport({ result: { content: [] } });
+  test('sends query as URL parameter on v2 path', async () => {
+    const calls = installTransport({ result: [] });
     await searchByContent(BASE_CONN, {
       query: 'findme', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
     });
-    const body = JSON.parse(calls[0].capture.body ?? '{}');
-    assert.ok(Array.isArray(body.parameters));
-    assert.ok((body.parameters as unknown[]).includes('findme'));
+    assert.ok(calls[0].capture.path.includes('/api/atelier/v2/'));
+    assert.ok(calls[0].capture.path.includes(`query=${encodeURIComponent('findme')}`));
   });
 
-  test('returns class results with .cls extension', async () => {
+  test('includes only *.cls mask when CLS category selected', async () => {
+    const calls = installTransport({ result: [] });
+    await searchByContent(BASE_CONN, {
+      query: 'q', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
+    });
+    assert.ok(calls[0].capture.path.includes(encodeURIComponent('*.cls')));
+    assert.ok(!calls[0].capture.path.includes(encodeURIComponent('*.mac')));
+  });
+
+  test('includes *.cls,*.mac,*.int,*.inc masks when no category filter', async () => {
+    const calls = installTransport({ result: [] });
+    await searchByContent(BASE_CONN, {
+      query: 'q', searchType: 'content', categories: [], maxResults: 10, includeSystem: false,
+    });
+    const path = calls[0].capture.path;
+    assert.ok(path.includes(encodeURIComponent('*.cls')));
+    assert.ok(path.includes(encodeURIComponent('*.mac')));
+  });
+
+  test('passes sys=0 when includeSystem is false', async () => {
+    const calls = installTransport({ result: [] });
+    await searchByContent(BASE_CONN, {
+      query: 'q', searchType: 'content', categories: [], maxResults: 10, includeSystem: false,
+    });
+    assert.ok(calls[0].capture.path.includes('sys=0'));
+  });
+
+  test('passes sys=1 when includeSystem is true', async () => {
+    const calls = installTransport({ result: [] });
+    await searchByContent(BASE_CONN, {
+      query: 'q', searchType: 'content', categories: [], maxResults: 10, includeSystem: true,
+    });
+    assert.ok(calls[0].capture.path.includes('sys=1'));
+  });
+
+  test('returns class match with name and CLS category', async () => {
     installTransport({
-      result: {
-        content: [{ ClassName: 'My.Package.ClassName', MemberName: 'MyMethod', Content: 'findme here' }],
-      },
+      result: [
+        { doc: 'My.Package.ClassName.cls', matches: [{ member: 'MyMethod', text: 'findme here' }] },
+      ],
     });
     const results = await searchByContent(BASE_CONN, {
       query: 'findme', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
@@ -388,54 +406,43 @@ suite('IrisSearchService > searchByContent', () => {
     assert.strictEqual(results.length, 1);
     assert.strictEqual(results[0].name, 'My.Package.ClassName.cls');
     assert.strictEqual(results[0].category, 'CLS');
-  });
-
-  test('sets context snippet on class results', async () => {
-    installTransport({
-      result: {
-        content: [{ ClassName: 'Foo.Bar', MemberName: 'DoSomething', Content: 'xxx findme yyy' }],
-      },
-    });
-    const results = await searchByContent(BASE_CONN, {
-      query: 'findme', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
-    });
-    assert.ok(results[0].context?.includes('DoSomething'));
+    assert.ok(results[0].context?.includes('MyMethod'));
     assert.ok(results[0].context?.includes('findme'));
   });
 
-  test('returns routine results with lowercase extension (.mac)', async () => {
+  test('returns routine match with name and MAC category', async () => {
     installTransport({
-      result: { content: [{ name: 'MyRoutine', type: 'MAC' }] },
+      result: [
+        { doc: 'MyRoutine.mac', matches: [{ line: '42', text: 'do findme' }] },
+      ],
     });
     const results = await searchByContent(BASE_CONN, {
-      query: 'q', searchType: 'content', categories: ['RTN'], maxResults: 10, includeSystem: false,
+      query: 'findme', searchType: 'content', categories: ['RTN'], maxResults: 10, includeSystem: false,
     });
-    assert.strictEqual(results.length, 1);
     assert.strictEqual(results[0].name, 'MyRoutine.mac');
     assert.strictEqual(results[0].category, 'MAC');
+    assert.ok(results[0].context?.includes('42'));
   });
 
-  test('returns routine results with .int extension', async () => {
+  test('expands multiple matches per doc into separate results', async () => {
     installTransport({
-      result: { content: [{ name: 'MyRoutine', type: 'INT' }] },
+      result: [
+        {
+          doc: 'Foo.cls',
+          matches: [
+            { member: 'MethodA', text: 'hit one' },
+            { member: 'MethodB', text: 'hit two' },
+          ],
+        },
+      ],
     });
     const results = await searchByContent(BASE_CONN, {
-      query: 'q', searchType: 'content', categories: ['RTN'], maxResults: 10, includeSystem: false,
+      query: 'hit', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
     });
-    assert.strictEqual(results[0].name, 'MyRoutine.int');
+    assert.strictEqual(results.length, 2);
   });
 
-  test('defaults extension to .mac when type is missing', async () => {
-    installTransport({
-      result: { content: [{ name: 'OldRoutine' }] },
-    });
-    const results = await searchByContent(BASE_CONN, {
-      query: 'q', searchType: 'content', categories: ['RTN'], maxResults: 10, includeSystem: false,
-    });
-    assert.ok(results[0].name.endsWith('.mac'));
-  });
-
-  test('returns empty array and does not throw on transport error (class search)', async () => {
+  test('returns empty array and does not throw on transport error', async () => {
     installErrorTransport(new Error('ECONNREFUSED'));
     const results = await searchByContent(BASE_CONN, {
       query: 'q', searchType: 'content', categories: ['CLS'], maxResults: 10, includeSystem: false,
