@@ -1,80 +1,43 @@
 import * as https from 'https';
 import * as http from 'http';
 import * as vscode from 'vscode';
-import type { IConnection, ISearchOptions, ISearchResult, DocCategory } from './types';
-
-/** Maps our category codes to the Atelier API "cat" field values */
-const ATELIER_CAT_MAP: Record<DocCategory, string[]> = {
-  CLS: ['cls'],
-  RTN: ['mac', 'int'],
-  MAC: ['mac'],
-  INT: ['int'],
-  INC: ['inc'],
-  PKG: ['pkg'],
-  CSP: ['csp'],
-};
+import type { IConnection, ISearchOptions, ISearchResult } from './types';
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Search document names via the Atelier docnames endpoint. */
-export async function searchByName(
+/**
+ * Search IRIS documents via the Atelier v2 /action/search endpoint.
+ * Results are grouped by document, each with their list of in-document matches.
+ */
+export async function search(
   connection: IConnection,
   options: ISearchOptions,
 ): Promise<ISearchResult[]> {
-  const { query, categories, maxResults, includeSystem } = options;
-
-  // Atelier filter: wrap with wildcards when no wildcard already present
-  const filter = query.includes('*') ? query : `*${query}*`;
-  const systemParam = includeSystem ? '1' : '0';
-  const path = buildPath(
-    connection,
-    `/docnames?filter=${encodeURIComponent(filter)}&generated=0&system=${systemParam}`,
-  );
-
-  const data = await makeRequest(connection, 'GET', path);
-  const docs = ((data?.result as { content?: unknown[] })?.content ?? []) as AtelierDoc[];
-
-  return docs
-    .filter((doc) => isCategoryMatch(doc.cat, categories))
-    .slice(0, maxResults)
-    .map((doc) => ({ name: doc.name, category: doc.cat }));
-}
-
-/** Search file content via the Atelier v2 search endpoint. */
-export async function searchByContent(
-  connection: IConnection,
-  options: ISearchOptions,
-): Promise<ISearchResult[]> {
-  const { query, categories, maxResults, includeSystem } = options;
+  const { query, categories, maxResults, includeSystem, regex = false } = options;
 
   const masks = buildFileMasks(categories);
   if (masks.length === 0) return [];
 
   const sysParam = includeSystem ? '1' : '0';
+  const regexParam = regex ? '1' : '0';
   const path = buildPath(
     connection,
-    `/action/search?query=${encodeURIComponent(query)}&files=${encodeURIComponent(masks.join(','))}&regex=0&sys=${sysParam}&max=${maxResults}`,
+    `/action/search?query=${encodeURIComponent(query)}&files=${encodeURIComponent(masks.join(','))}&regex=${regexParam}&sys=${sysParam}&max=${maxResults}`,
     2,
   );
 
   try {
-    const data = await makeRequest(connection, 'POST', path);
+    const data = await makeRequest(connection, 'GET', path);
     const docs = (data?.result ?? []) as SearchDoc[];
-    return docs
-      .flatMap((doc) =>
-        doc.matches.map((match) => ({
-          name: doc.doc,
-          category: categoryFromDocName(doc.doc),
-          context: match.member
-            ? `${match.member}: ${match.text}`
-            : `${match.line ?? ''}: ${match.text}`,
-        }))
-      )
-      .slice(0, maxResults);
+    return docs.map((doc) => ({
+      name: doc.doc,
+      category: categoryFromDocName(doc.doc),
+      matches: doc.matches,
+    }));
   } catch (err) {
-    console.error('[ObjectScript Search] Content search failed:', err);
+    console.error('[ObjectScript Search] Search failed:', err);
     return [];
   }
 }
@@ -84,7 +47,7 @@ export async function searchByContent(
 // ---------------------------------------------------------------------------
 
 /** Build Atelier file masks from category filter. */
-function buildFileMasks(categories: DocCategory[]): string[] {
+function buildFileMasks(categories: import('./types').DocCategory[]): string[] {
   if (categories.length === 0) return ['*.cls', '*.mac', '*.int', '*.inc'];
   const masks = new Set<string>();
   for (const cat of categories) {
@@ -114,30 +77,6 @@ export function buildPath(connection: IConnection, suffix: string, version = 1):
   const prefix = connection.pathPrefix?.replace(/\/$/, '') ?? '';
   const ns = encodeURIComponent(connection.namespace);
   return `${prefix}/api/atelier/v${version}/${ns}${suffix}`;
-}
-
-export function extractSnippet(content: string, query: string): string {
-  const idx = content.toLowerCase().indexOf(query.toLowerCase());
-  if (idx < 0) {
-    return '';
-  }
-  const start = Math.max(0, idx - 30);
-  const end = Math.min(content.length, idx + query.length + 30);
-  return content.substring(start, end).replace(/[\r\n]+/g, ' ').trim();
-}
-
-export function isCategoryMatch(cat: string, categories: DocCategory[]): boolean {
-  if (categories.length === 0) {
-    return true;
-  }
-  const catUpper = cat.toUpperCase();
-  return categories.some((c) => {
-    if (c === catUpper) {
-      return true;
-    }
-    const mapped = ATELIER_CAT_MAP[c] ?? [];
-    return mapped.includes(cat.toLowerCase());
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -238,26 +177,11 @@ function makeRequest(
 // Response shape types (internal)
 // ---------------------------------------------------------------------------
 
-interface AtelierDoc {
-  name: string;
-  cat: string;
-  ts?: string;
-  db?: string;
-}
-
 export interface AtelierQueryResponse {
-  // v1 endpoints: result = { content: unknown[] }
-  // v2 search endpoint: result = SearchDoc[]
   result?: unknown;
 }
 
 interface SearchDoc {
   doc: string;
-  matches: SearchMatch[];
-}
-
-interface SearchMatch {
-  member?: string;
-  line?: string;
-  text: string;
+  matches: import('./types').ISearchMatch[];
 }

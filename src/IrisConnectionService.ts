@@ -21,7 +21,13 @@ export async function getConnection(
 
   if (conn?.active === true) {
     if (typeof conn.server === 'string' && conn.server) {
-      return resolveNamedServer(conn.server, (conn.ns as string) || 'USER', scope);
+      return resolveNamedServer(
+        conn.server,
+        (conn.ns as string) || 'USER',
+        scope,
+        conn.username as string | undefined,
+        conn.password as string | undefined,
+      );
     }
     if (typeof conn.host === 'string' && conn.host) {
       return {
@@ -43,6 +49,8 @@ async function resolveNamedServer(
   serverName: string,
   namespace: string,
   scope?: vscode.ConfigurationScope,
+  usernameOverride?: string,
+  passwordOverride?: string,
 ): Promise<IConnection | undefined> {
   const api = await getServerManagerAPI();
   if (!api) {
@@ -54,7 +62,12 @@ async function resolveNamedServer(
     return undefined;
   }
 
-  return specToConnection(spec, namespace);
+  const base = specToConnection(spec, namespace);
+  return {
+    ...base,
+    username: usernameOverride || base.username,
+    password: passwordOverride !== undefined ? passwordOverride : base.password,
+  };
 }
 
 async function resolveFromServerManager(

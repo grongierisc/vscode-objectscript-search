@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import type { ISearchResult } from './types';
 import { getConnection } from './IrisConnectionService';
-import { searchByName, searchByContent } from './IrisSearchService';
+import { search } from './IrisSearchService';
 
 export class SearchViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'ObjectScriptSearch';
@@ -28,7 +28,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       switch (msg.type) {
         case 'search':
-          await this._handleSearch(msg.query, msg.searchType, msg.categories);
+          await this._handleSearch(msg.query, msg.categories);
           break;
         case 'openFile':
           await this._openFile(msg.name, msg.category);
@@ -41,7 +41,6 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
   private async _handleSearch(
     query: string,
-    searchType: 'name' | 'content',
     categories: string[],
   ): Promise<void> {
     if (!this._view) {
@@ -68,16 +67,12 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
       const opts = {
         query,
-        searchType: searchType as 'name' | 'content',
         categories: categories as import('./types').DocCategory[],
         maxResults,
         includeSystem,
       };
 
-      const results =
-        searchType === 'content'
-          ? await searchByContent(connection, opts)
-          : await searchByName(connection, opts);
+      const results = await search(connection, opts);
 
       this._post({ type: 'results', results, serverInfo: connection.serverName ?? connection.host });
     } catch (err) {
@@ -245,56 +240,72 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     .loading .spinner { display: block; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Results list ───────────────────────────────────────────────────── */
-    .results { list-style: none; }
+    /* ── Results: grouped by file, VS Code style ───────────────────────── */
+    .file-group { margin-bottom: 2px; }
 
-    .result {
+    .file-header {
       display: flex;
-      align-items: flex-start;
+      align-items: center;
       padding: 3px 4px;
       border-radius: 2px;
       cursor: pointer;
       gap: 5px;
+      font-size: 12px;
+      font-weight: 600;
     }
-    .result:hover { background: var(--vscode-list-hoverBackground); }
-    .result:active { background: var(--vscode-list-activeSelectionBackground); }
+    .file-header:hover { background: var(--vscode-list-hoverBackground); }
 
-    .result-badge {
+    .file-header .result-badge { flex-shrink: 0; }
+
+    .file-name {
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .match-count {
       flex-shrink: 0;
-      width: 18px; height: 18px;
-      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 400;
+      color: var(--vscode-descriptionForeground);
+      padding: 1px 6px;
+      border-radius: 8px;
       background: var(--vscode-badge-background);
       color: var(--vscode-badge-foreground);
-      font-size: 9px;
-      font-weight: 700;
+    }
+
+    .match-list {
+      list-style: none;
+      margin-left: 22px;
+      border-left: 1px solid var(--vscode-tree-indentGuidesStroke, #555);
+    }
+
+    .match-item {
       display: flex;
-      align-items: center;
-      justify-content: center;
-      margin-top: 1px;
-    }
-
-    .result-body { flex: 1; min-width: 0; }
-
-    .result-name {
-      font-size: 12px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-
-    .result-ctx {
+      align-items: baseline;
+      gap: 6px;
+      padding: 2px 8px;
+      cursor: pointer;
+      border-radius: 2px;
       font-size: 11px;
+    }
+    .match-item:hover { background: var(--vscode-list-hoverBackground); }
+
+    .match-loc {
+      flex-shrink: 0;
       color: var(--vscode-descriptionForeground);
+      font-size: 10px;
+      min-width: 30px;
+      text-align: right;
+    }
+
+    .match-text {
+      flex: 1;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      margin-top: 1px;
-    }
-
-    mark {
-      background: var(--vscode-editor-findMatchHighlightBackground, #9e6a03);
-      color: inherit;
-      border-radius: 1px;
+      color: var(--vscode-foreground);
     }
 
     /* ── Error / empty ──────────────────────────────────────────────────── */
@@ -314,6 +325,25 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
       text-align: center;
       padding: 20px 8px;
     }
+
+    mark {
+      background: var(--vscode-editor-findMatchHighlightBackground, #9e6a03);
+      color: inherit;
+      border-radius: 1px;
+    }
+
+    .result-badge {
+      flex-shrink: 0;
+      width: 18px; height: 18px;
+      border-radius: 3px;
+      background: var(--vscode-badge-background);
+      color: var(--vscode-badge-foreground);
+      font-size: 9px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
   </style>
 </head>
 <body>
@@ -326,13 +356,6 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   </div>
 
   <div class="options">
-    <div class="opt-row">
-      <span class="opt-label">Mode:</span>
-      <div class="pills" id="modeGroup">
-        <button class="pill active" data-value="name">By Name</button>
-        <button class="pill" data-value="content">By Content</button>
-      </div>
-    </div>
     <div class="opt-row">
       <span class="opt-label">Types:</span>
       <div class="pills" id="typeGroup">
@@ -351,12 +374,11 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     <span id="statusText"></span>
   </div>
 
-  <ul class="results" id="results"></ul>
+  <div id="results"></div>
 
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
 
-  let searchType = 'name';
   let categories = ['CLS', 'RTN', 'INC'];
   let lastQuery = '';
 
@@ -383,10 +405,6 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  setupPillGroup('modeGroup', false, () => {
-    searchType = document.querySelector('#modeGroup .pill.active').dataset.value;
-  });
-
   setupPillGroup('typeGroup', true, () => {
     categories = Array.from(document.querySelectorAll('#typeGroup .pill.active'))
       .map(p => p.dataset.value);
@@ -398,7 +416,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     const q = queryEl.value.trim();
     if (!q) return;
     lastQuery = q;
-    vscode.postMessage({ type: 'search', query: q, searchType, categories });
+    vscode.postMessage({ type: 'search', query: q, categories });
   }
 
   searchBtn.addEventListener('click', doSearch);
@@ -433,49 +451,81 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     resultsEl.innerHTML = '';
     if (!results.length) {
       statusTxt.textContent = lastQuery ? 'No results.' : '';
-      const li = document.createElement('li');
-      li.className = 'empty';
-      li.textContent = lastQuery ? 'No documents matched your query.' : '';
-      resultsEl.appendChild(li);
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = lastQuery ? 'No documents matched your query.' : '';
+      resultsEl.appendChild(d);
       return;
     }
 
-    const limit = results.length >= 100 ? ' (limit reached)' : '';
-    statusTxt.textContent = results.length + (results.length === 1 ? ' result' : ' results') + limit
+    const totalMatches = results.reduce((n, r) => n + (r.matches ? r.matches.length : 0), 0);
+    const limit = totalMatches >= 200 ? ' (limit reached)' : '';
+    statusTxt.textContent =
+      totalMatches + (totalMatches === 1 ? ' match' : ' matches')
+      + ' in ' + results.length + (results.length === 1 ? ' file' : ' files')
+      + limit
       + (serverInfo ? ' · ' + serverInfo : '');
 
     for (const r of results) {
-      const li = document.createElement('li');
-      li.className = 'result';
-      li.title = r.name;
-      li.dataset.name = r.name;
-      li.dataset.category = r.category;
+      const group = document.createElement('div');
+      group.className = 'file-group';
+
+      // ── File header ──────────────────────────────────────────────────────
+      const header = document.createElement('div');
+      header.className = 'file-header';
+      header.title = r.name;
+      header.dataset.name = r.name;
+      header.dataset.category = r.category;
 
       const badge = document.createElement('div');
       badge.className = 'result-badge';
       badge.textContent = badgeText(r.category);
 
-      const body = document.createElement('div');
-      body.className = 'result-body';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'file-name';
+      nameEl.textContent = r.name;
 
-      const name = document.createElement('div');
-      name.className = 'result-name';
-      name.innerHTML = highlight(esc(r.name), lastQuery);
-      body.appendChild(name);
+      const countEl = document.createElement('span');
+      countEl.className = 'match-count';
+      const mc = r.matches ? r.matches.length : 0;
+      countEl.textContent = mc + (mc === 1 ? ' match' : ' matches');
 
-      if (r.context) {
-        const ctx = document.createElement('div');
-        ctx.className = 'result-ctx';
-        ctx.textContent = r.context;
-        body.appendChild(ctx);
-      }
-
-      li.appendChild(badge);
-      li.appendChild(body);
-      li.addEventListener('click', () =>
+      header.appendChild(badge);
+      header.appendChild(nameEl);
+      header.appendChild(countEl);
+      header.addEventListener('click', () =>
         vscode.postMessage({ type: 'openFile', name: r.name, category: r.category }),
       );
-      resultsEl.appendChild(li);
+      group.appendChild(header);
+
+      // ── Match list ───────────────────────────────────────────────────────
+      if (r.matches && r.matches.length) {
+        const list = document.createElement('ul');
+        list.className = 'match-list';
+
+        for (const m of r.matches) {
+          const li = document.createElement('li');
+          li.className = 'match-item';
+
+          const loc = document.createElement('span');
+          loc.className = 'match-loc';
+          loc.textContent = m.member || m.line || '';
+
+          const text = document.createElement('span');
+          text.className = 'match-text';
+          text.innerHTML = highlight(esc(m.text.trim()), lastQuery);
+
+          li.appendChild(loc);
+          li.appendChild(text);
+          li.addEventListener('click', () =>
+            vscode.postMessage({ type: 'openFile', name: r.name, category: r.category }),
+          );
+          list.appendChild(li);
+        }
+        group.appendChild(list);
+      }
+
+      resultsEl.appendChild(group);
     }
   }
 
@@ -527,5 +577,5 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 // ---------------------------------------------------------------------------
 
 type WebviewMessage =
-  | { type: 'search'; query: string; searchType: 'name' | 'content'; categories: string[] }
+  | { type: 'search'; query: string; categories: string[] }
   | { type: 'openFile'; name: string; category: string };

@@ -182,4 +182,69 @@ suite('IrisConnectionService > getConnection', () => {
     await getConnection();
     assert.ok(activated.includes('activated'), 'activate() should have been called');
   });
+
+  // ── credential overrides when using named server (fix for 401) ────────────
+
+  test('overrides Server Manager credentials with username and password from conn config', async () => {
+    stubObjectScriptConn(sandbox, {
+      active: true, server: 'my-iris', ns: 'IRISAPP',
+      username: 'SuperUser', password: 'SYS',
+    });
+
+    const fakeSpec = {
+      name: 'my-iris',
+      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '' },
+      username: 'OldUser', password: 'OldPass',
+    };
+    sandbox.stub(vscode.extensions, 'getExtension').returns({
+      isActive: true,
+      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
+    } as never);
+
+    const result = await getConnection();
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.username, 'SuperUser', 'conn username should override spec username');
+    assert.strictEqual(result!.password, 'SYS', 'conn password should override spec password');
+    assert.strictEqual(result!.namespace, 'IRISAPP');
+  });
+
+  test('falls back to Server Manager credentials when conn omits username and password', async () => {
+    stubObjectScriptConn(sandbox, { active: true, server: 'my-iris', ns: 'USER' });
+
+    const fakeSpec = {
+      name: 'my-iris',
+      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '' },
+      username: 'SpecUser', password: 'SpecPass',
+    };
+    sandbox.stub(vscode.extensions, 'getExtension').returns({
+      isActive: true,
+      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
+    } as never);
+
+    const result = await getConnection();
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.username, 'SpecUser', 'should use spec username when conn has none');
+    assert.strictEqual(result!.password, 'SpecPass', 'should use spec password when conn has none');
+  });
+
+  test('allows overriding password with an empty string', async () => {
+    stubObjectScriptConn(sandbox, {
+      active: true, server: 'my-iris', ns: 'USER',
+      username: 'Admin', password: '',
+    });
+
+    const fakeSpec = {
+      name: 'my-iris',
+      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '' },
+      username: 'Admin', password: 'ShouldBeIgnored',
+    };
+    sandbox.stub(vscode.extensions, 'getExtension').returns({
+      isActive: true,
+      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
+    } as never);
+
+    const result = await getConnection();
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.password, '', 'explicit empty-string password in conn should be used');
+  });
 });

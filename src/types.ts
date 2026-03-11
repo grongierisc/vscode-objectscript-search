@@ -1,7 +1,5 @@
 export type DocCategory = 'CLS' | 'RTN' | 'MAC' | 'INT' | 'INC' | 'PKG' | 'CSP';
 
-export type SearchType = 'name' | 'content';
-
 export interface IConnection {
   serverName?: string;
   host: string;
@@ -15,17 +13,23 @@ export interface IConnection {
 
 export interface ISearchOptions {
   query: string;
-  searchType: SearchType;
   categories: DocCategory[];
   maxResults: number;
   includeSystem: boolean;
+  regex?: boolean;
+}
+
+export interface ISearchMatch {
+  text: string;
+  member?: string;
+  line?: string;
 }
 
 export interface ISearchResult {
   /** Full document name, e.g. "My.Package.ClassName.cls" or "MyRoutine.mac" */
   name: string;
-  /** Atelier category string, e.g. "CLS", "MAC", "INT", "INC" */
+  /** Atelier category code, e.g. "CLS", "MAC", "INT", "INC" */
   category: string;
-  /** Optional snippet showing where the match was found (content search) */
-  context?: string;
+  /** All matches found within this document */
+  matches: ISearchMatch[];
 }
