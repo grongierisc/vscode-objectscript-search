@@ -1,10 +1,8 @@
 import * as vscode from 'vscode';
 import type { IConnection } from './types';
 import { AUTHENTICATION_PROVIDER as SM_AUTH_PROVIDER_ID } from '@intersystems-community/intersystems-servermanager';
-import type { ServerManagerAPI } from '@intersystems-community/intersystems-servermanager';
 
 const OBJECTSCRIPT_EXT_ID = 'intersystems-community.vscode-objectscript';
-const SM_EXT_ID = 'intersystems-community.servermanager';
 
 /** Subset of the vscode-objectscript public API that we consume. */
 interface ObjectScriptExtAPI {
@@ -30,9 +28,10 @@ interface ObjectScriptExtAPI {
  *   - Named server via `objectscript.conn.server` → `intersystems.servers.*`
  *   - Docker-compose port resolution
  *
- * For named servers whose passwords are stored in the OS keychain, the Server
- * Manager extension's `getServerSpec` API resolves the credential (prompting
- * if necessary), with a direct auth-provider lookup as a fallback.
+ * For named servers, `asyncServerForUri` intentionally omits passwords stored
+ * in the OS keychain. We retrieve them via the Server Manager auth provider,
+ * prompting the user if no cached session exists — mirroring what
+ * vscode-objectscript itself does in `resolvePassword()`.
  */
 export async function getConnection(): Promise<IConnection | undefined> {
   const ext = vscode.extensions.getExtension<ObjectScriptExtAPI>(OBJECTSCRIPT_EXT_ID);
@@ -40,11 +39,6 @@ export async function getConnection(): Promise<IConnection | undefined> {
   if (!ext.isActive) await ext.activate();
 
   const api = ext.exports;
-
-  // Server Manager is an extensionDependency so it is always present.
-  const smExt = vscode.extensions.getExtension<ServerManagerAPI>(SM_EXT_ID);
-  if (smExt && !smExt.isActive) await smExt.activate();
-  const smApi = smExt?.exports;
 
   for (const folder of vscode.workspace.workspaceFolders ?? []) {
     // Quick-filter: only consider folders where the user has enabled the connection.
@@ -54,42 +48,29 @@ export async function getConnection(): Promise<IConnection | undefined> {
     if (conn?.active !== true) continue;
 
     try {
-      let info = await api.asyncServerForUri(folder.uri);
+      const info = await api.asyncServerForUri(folder.uri);
       if (!info.active || !info.host || !info.port) continue;
 
       let password = info.password;
 
-      // Named servers store their password in the OS keychain via Server Manager.
-      // asyncServerForUri intentionally omits it unless stored as plaintext in settings.
-      // Mirror vscode-objectscript's resolvePassword(): getServerSpec to get the account
-      // hint, then try silent auth, then prompt with createIfNone if silent fails.
-      if (!password && info.serverName && smApi) {
-        const serverSpec = await smApi.getServerSpec(info.serverName, folder).then(s => s, () => undefined);
-        // getServerSpec may already have the password for plaintext settings
-        password = serverSpec?.password;
+      // Named servers store their password in the OS keychain. asyncServerForUri
+      // intentionally omits it (only exposes passwords already in plaintext
+      // settings). Use the Server Manager auth provider to retrieve it, prompting
+      // if no cached session exists — same two-step approach as vscode-objectscript.
+      if (!password && info.serverName) {
+        const scopes = [info.serverName, info.username ?? ''];
 
-        if (!password) {
-          const account = serverSpec ? smApi.getAccount(serverSpec) : undefined;
-          const scopes = [info.serverName, info.username ?? ''];
+        let session = await vscode.authentication
+          .getSession(SM_AUTH_PROVIDER_ID, scopes, { silent: true })
+          .then(s => s, () => undefined);
 
-          // Try silently first (session likely cached if vscode-objectscript already connected)
-          let session = await vscode.authentication
-            .getSession(SM_AUTH_PROVIDER_ID, scopes, { silent: true, account })
+        if (!session) {
+          session = await vscode.authentication
+            .getSession(SM_AUTH_PROVIDER_ID, scopes, { createIfNone: true })
             .then(s => s, () => undefined);
-
-          // If no cached session, prompt the user — exactly as vscode-objectscript does
-          if (!session) {
-            session = await vscode.authentication
-              .getSession(SM_AUTH_PROVIDER_ID, scopes, { createIfNone: true, account })
-              .then(s => s, () => undefined);
-          }
-
-          password = session?.accessToken;
-          // Session may report the actual username (e.g. when settings had no username)
-          if (session && !info.username) {
-            info = { ...info, username: session.scopes[1] || info.username };
-          }
         }
+
+        password = session?.accessToken;
       }
 
       return {

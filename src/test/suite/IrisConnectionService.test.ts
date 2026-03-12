@@ -33,7 +33,12 @@ function makeServerInfo(overrides: Partial<{
   };
 }
 
-/** Stub workspace folders + objectscript.conn.active check + vscode-objectscript API. */
+/**
+ * Stub workspace folders + objectscript.conn + the vscode-objectscript extension.
+ * The simplified IrisConnectionService no longer uses the Server Manager extension
+ * API directly — only the auth provider constant (a string) — so no SM extension
+ * stub is needed here.
+ */
 function setupEnv(
   sandbox: sinon.SinonSandbox,
   opts: {
@@ -163,15 +168,13 @@ suite('IrisConnectionService > getConnection', () => {
 
   // ── named server: password via auth provider ──────────────────────────────
 
-  test('uses auth provider session when password is undefined (named server)', async () => {
+  test('uses silent auth session to get keychain password for named server', async () => {
     setupEnv(sandbox, {
-      serverInfo: makeServerInfo({
-        serverName: 'my-iris', username: 'SuperUser', password: undefined,
-      }),
+      serverInfo: makeServerInfo({ serverName: 'my-iris', username: 'SuperUser', password: undefined }),
     });
     sandbox.stub(vscode.authentication, 'getSession').resolves({
       id: '1', accessToken: 'keychainSecret',
-      account: { id: 'SuperUser', label: 'SuperUser' }, scopes: [],
+      account: { id: 'SuperUser', label: 'SuperUser' }, scopes: ['my-iris', 'SuperUser'],
     });
 
     const result = await getConnection();
@@ -181,7 +184,44 @@ suite('IrisConnectionService > getConnection', () => {
     assert.strictEqual(result!.password, 'keychainSecret');
   });
 
-  test('returns empty password when auth provider also returns nothing', async () => {
+  test('falls back to createIfNone:true when silent session returns null', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({ serverName: 'my-iris', username: 'Admin', password: undefined }),
+    });
+
+    const getSessionStub = sandbox.stub(vscode.authentication, 'getSession');
+    getSessionStub.onFirstCall().resolves(null as never);
+    getSessionStub.onSecondCall().resolves({
+      id: '2', accessToken: 'promptedSecret',
+      account: { id: 'Admin', label: 'Admin' }, scopes: ['my-iris', 'Admin'],
+    });
+
+    const result = await getConnection();
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.password, 'promptedSecret');
+    assert.ok(getSessionStub.calledTwice, 'should call getSession twice');
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+    const allArgs = getSessionStub.args as any[][];
+    assert.strictEqual(allArgs[0][2].silent, true);
+    assert.strictEqual(allArgs[1][2].createIfNone, true);
+  });
+
+  test('does not call createIfNone when silent session succeeds', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({ serverName: 'my-iris', password: undefined }),
+    });
+    const getSessionStub = sandbox.stub(vscode.authentication, 'getSession').resolves({
+      id: '1', accessToken: 'cachedTok',
+      account: { id: 'u', label: 'u' }, scopes: [],
+    });
+
+    const result = await getConnection();
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.password, 'cachedTok');
+    assert.ok(getSessionStub.calledOnce, 'should only call getSession once when silent succeeds');
+  });
+
+  test('returns empty password when both getSession calls return nothing', async () => {
     setupEnv(sandbox, {
       serverInfo: makeServerInfo({ serverName: 'my-iris', password: undefined }),
     });
@@ -230,6 +270,17 @@ suite('IrisConnectionService > getConnection', () => {
     assert.strictEqual(await getConnection(), undefined);
   });
 
+  test('returns empty password when auth provider call throws', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({ serverName: 'my-iris', password: undefined }),
+    });
+    sandbox.stub(vscode.authentication, 'getSession').rejects(new Error('provider unavailable'));
+
+    const result = await getConnection();
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.password, '');
+  });
+
   // ── port validation ───────────────────────────────────────────────────────
 
   test('returns undefined when asyncServerForUri reports port 0', async () => {
@@ -253,19 +304,6 @@ suite('IrisConnectionService > getConnection', () => {
     assert.strictEqual(result?.serverName, 'prod-iris');
   });
 
-  // ── auth provider throws ──────────────────────────────────────────────────
-
-  test('returns empty password when auth provider call throws', async () => {
-    setupEnv(sandbox, {
-      serverInfo: makeServerInfo({ serverName: 'my-iris', password: undefined }),
-    });
-    sandbox.stub(vscode.authentication, 'getSession').rejects(new Error('provider unavailable'));
-
-    const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.password, '');
-  });
-
   // ── asyncServerForUri receives correct URI ────────────────────────────────
 
   test('calls asyncServerForUri with the workspace folder URI', async () => {
@@ -278,10 +316,9 @@ suite('IrisConnectionService > getConnection', () => {
       get: (key: string) => key === 'conn' ? { active: true } : undefined,
       has: () => false, inspect: () => undefined, update: async () => undefined,
     } as unknown as vscode.WorkspaceConfiguration);
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: { asyncServerForUri },
-    } as never);
+    sandbox.stub(vscode.extensions, 'getExtension').returns(
+      { isActive: true, exports: { asyncServerForUri } } as never
+    );
 
     await getConnection();
     assert.ok(asyncServerForUri.calledOnceWith(fakeUri), 'asyncServerForUri must receive the folder URI');
@@ -316,10 +353,9 @@ suite('IrisConnectionService > getConnection', () => {
       if (info instanceof Error) return Promise.reject(info);
       return Promise.resolve(info ?? makeServerInfo());
     });
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: { asyncServerForUri },
-    } as never);
+    sandbox.stub(vscode.extensions, 'getExtension').returns(
+      { isActive: true, exports: { asyncServerForUri } } as never
+    );
   }
 
   test('skips inactive folder and returns connection from second active folder', async () => {
