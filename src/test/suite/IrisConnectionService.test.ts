@@ -118,7 +118,7 @@ suite('IrisConnectionService > getConnection', () => {
     assert.ok(result !== undefined);
     assert.strictEqual(result!.host, 'irishost');
     assert.strictEqual(result!.port, 52773);
-    assert.strictEqual(result!.namespace, 'PROD');
+    assert.strictEqual(result!.ns, 'PROD');
     assert.strictEqual(result!.username, 'Admin');
     assert.strictEqual(result!.password, 'pass');
     assert.strictEqual(result!.scheme, 'http');
@@ -134,13 +134,13 @@ suite('IrisConnectionService > getConnection', () => {
   test('uppercases namespace', async () => {
     setupEnv(sandbox, { serverInfo: makeServerInfo({ namespace: 'myns' }) });
     const result = await getConnection();
-    assert.strictEqual(result?.namespace, 'MYNS');
+    assert.strictEqual(result?.ns, 'MYNS');
   });
 
   test('defaults namespace to USER when empty', async () => {
     setupEnv(sandbox, { serverInfo: makeServerInfo({ namespace: '' }) });
     const result = await getConnection();
-    assert.strictEqual(result?.namespace, 'USER');
+    assert.strictEqual(result?.ns, 'USER');
   });
 
   test('defaults username to _SYSTEM when absent in result', async () => {

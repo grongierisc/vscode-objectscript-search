@@ -2,51 +2,41 @@ import * as assert from 'assert';
 import * as sinon from 'sinon';
 import * as vscode from 'vscode';
 import {
-  buildPath,
-  search,
+  AtelierAPI,
   searchStream,
+  buildFileMasks,
+  categoryFromDocName,
   _setTransport,
-} from '../../IrisSearchService';
-import type { IConnection, ISearchResult } from '../../types';
-import type { AtelierQueryResponse, RequestCapture } from '../../IrisSearchService';
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+  Atelier,
+} from '../../api';
+import type { RequestCapture } from '../../api';
+import type { IConnection } from '../../types';
 
 const BASE_CONN: IConnection = {
   host: 'localhost',
   port: 52773,
   scheme: 'http',
   pathPrefix: '',
-  namespace: 'USER',
+  ns: 'USER',
   username: '_SYSTEM',
   password: 'SYS',
 };
 
 interface CapturedCall {
   capture: RequestCapture;
-  response: AtelierQueryResponse;
+  response: Atelier.Response;
 }
 
-/** Install a fake transport that returns the given body and records calls. */
-function installTransport(
-  response: AtelierQueryResponse,
-  calls: CapturedCall[] = [],
-): CapturedCall[] {
-  _setTransport(async (capture) => {
-    calls.push({ capture, response });
-    return response;
-  });
+function installTransport(response: Atelier.Response, calls: CapturedCall[] = []): CapturedCall[] {
+  _setTransport(async (capture) => { calls.push({ capture, response }); return response; });
   return calls;
 }
 
-/** Install a transport that returns successive responses per call. */
-function installMultiTransport(responses: AtelierQueryResponse[]): CapturedCall[] {
+function installMultiTransport(responses: Array<Partial<Atelier.Response> & Record<string, unknown>>): CapturedCall[] {
   const calls: CapturedCall[] = [];
   let idx = 0;
   _setTransport(async (capture) => {
-    const response = responses[idx] ?? responses[responses.length - 1];
+    const response = (responses[idx] ?? responses[responses.length - 1]) as Atelier.Response;
     idx++;
     calls.push({ capture, response });
     return response;
@@ -54,305 +44,320 @@ function installMultiTransport(responses: AtelierQueryResponse[]): CapturedCall[
   return calls;
 }
 
-/** Install a transport that rejects with the given error. */
-function installErrorTransport(error: Error): void {
-  _setTransport(async () => { throw error; });
+function makeSandbox() {
+  const sandbox = sinon.createSandbox();
+  sandbox.stub(vscode.workspace, 'getConfiguration').returns({
+    get: (_key: string, def?: unknown) => def,
+    has: () => false,
+    inspect: () => undefined,
+    update: async () => undefined,
+  } as unknown as vscode.WorkspaceConfiguration);
+  return sandbox;
 }
 
 // ---------------------------------------------------------------------------
-// Suite: buildPath
+// Suite: AtelierAPI — URL construction
 // ---------------------------------------------------------------------------
 
-suite('IrisSearchService > buildPath', () => {
-  test('builds v2 path without prefix', () => {
-    const result = buildPath({ ...BASE_CONN, pathPrefix: '' }, '/action/search', 2);
-    assert.strictEqual(result, '/api/atelier/v2/USER/action/search');
+suite('AtelierAPI > request paths', () => {
+  let sandbox: sinon.SinonSandbox;
+  setup(() => { sandbox = makeSandbox(); });
+  teardown(() => { sandbox.restore(); _setTransport(undefined); });
+
+  test('actionSearch builds v2 path without prefix', async () => {
+    const calls = installTransport({ result: [] });
+    await new AtelierAPI({ ...BASE_CONN, pathPrefix: '' }).actionSearch({ query: 'x' }).catch(() => undefined);
+    assert.ok(calls[0].capture.path.startsWith('/api/atelier/v2/USER/action/search'), `path: ${calls[0].capture.path}`);
   });
 
-  test('builds v2 path with prefix (no trailing slash)', () => {
-    const result = buildPath({ ...BASE_CONN, pathPrefix: '/myapp' }, '/action/search', 2);
-    assert.strictEqual(result, '/myapp/api/atelier/v2/USER/action/search');
+  test('actionSearch builds v2 path with prefix (no trailing slash)', async () => {
+    const calls = installTransport({ result: [] });
+    await new AtelierAPI({ ...BASE_CONN, pathPrefix: '/myapp' }).actionSearch({ query: 'x' }).catch(() => undefined);
+    assert.ok(calls[0].capture.path.startsWith('/myapp/api/atelier/v2/USER/action/search'), `path: ${calls[0].capture.path}`);
   });
 
-  test('strips trailing slash from prefix', () => {
-    const result = buildPath({ ...BASE_CONN, pathPrefix: '/myapp/' }, '/action/search', 2);
-    assert.strictEqual(result, '/myapp/api/atelier/v2/USER/action/search');
+  test('actionSearch strips trailing slash from prefix', async () => {
+    const calls = installTransport({ result: [] });
+    await new AtelierAPI({ ...BASE_CONN, pathPrefix: '/myapp/' }).actionSearch({ query: 'x' }).catch(() => undefined);
+    assert.ok(calls[0].capture.path.startsWith('/myapp/api/atelier/v2/USER/action/search'), `path: ${calls[0].capture.path}`);
   });
 
-  test('URL-encodes namespace', () => {
-    const result = buildPath({ ...BASE_CONN, namespace: 'MY NS' }, '/action/search', 2);
-    assert.strictEqual(result, '/api/atelier/v2/MY%20NS/action/search');
+  test('actionSearch URL-encodes namespace', async () => {
+    const calls = installTransport({ result: [] });
+    await new AtelierAPI({ ...BASE_CONN, ns: 'MY NS' }).actionSearch({ query: 'x' }).catch(() => undefined);
+    assert.ok(calls[0].capture.path.includes('/MY%20NS/'), `path: ${calls[0].capture.path}`);
   });
 
-  test('defaults to v1 when no version given', () => {
-    const result = buildPath(BASE_CONN, '/docnames');
-    assert.ok(result.includes('/api/atelier/v1/'));
+  test('serverInfo uses no version prefix', async () => {
+    const calls = installTransport({ result: { content: { api: 1, version: '', id: '', namespaces: [] } } });
+    await new AtelierAPI(BASE_CONN).serverInfo().catch(() => undefined);
+    assert.ok(calls[0].capture.path.endsWith('/api/atelier/'), `path: ${calls[0].capture.path}`);
+    assert.ok(!calls[0].capture.path.includes('/api/atelier/v'), `should have no /v: ${calls[0].capture.path}`);
+  });
+
+  test('queueAsync POSTs to v1 /ns/work', async () => {
+    const calls = installTransport({ result: { location: 'USER/work/job1' } });
+    await new AtelierAPI(BASE_CONN).queueAsync({ request: 'search' }).catch(() => undefined);
+    assert.strictEqual(calls[0].capture.method, 'POST');
+    assert.ok(calls[0].capture.path.endsWith('/USER/work'), `path: ${calls[0].capture.path}`);
+  });
+
+  test('pollAsync GETs v1 /ns/work/{id}', async () => {
+    const calls = installTransport({ result: [] });
+    await new AtelierAPI(BASE_CONN).pollAsync('abc123').catch(() => undefined);
+    assert.strictEqual(calls[0].capture.method, 'GET');
+    assert.ok(calls[0].capture.path.includes('/USER/work/abc123'), `path: ${calls[0].capture.path}`);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Suite: search
+// Suite: AtelierAPI — actionSearch
 // ---------------------------------------------------------------------------
 
-suite('IrisSearchService > search', () => {
+suite('AtelierAPI > actionSearch', () => {
   let sandbox: sinon.SinonSandbox;
-
-  setup(() => {
-    sandbox = sinon.createSandbox();
-    sandbox.stub(vscode.workspace, 'getConfiguration').returns({
-      get: (_key: string, def?: unknown) => def,
-      has: () => false,
-      inspect: () => undefined,
-      update: async () => undefined,
-    } as unknown as vscode.WorkspaceConfiguration);
-  });
-
-  teardown(() => {
-    sandbox.restore();
-    _setTransport(undefined);
-  });
+  setup(() => { sandbox = makeSandbox(); });
+  teardown(() => { sandbox.restore(); _setTransport(undefined); });
 
   test('makes a single GET request', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'findme', categories: [], maxResults: 10, includeSystem: false });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'findme' });
     assert.strictEqual(calls.length, 1);
     assert.strictEqual(calls[0].capture.method, 'GET');
   });
 
   test('sends query as URL parameter on v2 path', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'findme', categories: ['CLS'], maxResults: 10, includeSystem: false });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'findme' });
     assert.ok(calls[0].capture.path.includes('/api/atelier/v2/'));
-    assert.ok(calls[0].capture.path.includes(`query=${encodeURIComponent('findme')}`));
+    assert.ok(calls[0].capture.path.includes('query=' + encodeURIComponent('findme')));
   });
 
-  test('includes only *.cls mask when CLS category selected', async () => {
+  test('passes sys=0 for false', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'q', categories: ['CLS'], maxResults: 10, includeSystem: false });
-    assert.ok(calls[0].capture.path.includes(encodeURIComponent('*.cls')));
-    assert.ok(!calls[0].capture.path.includes(encodeURIComponent('*.mac')));
-  });
-
-  test('includes all masks when categories empty', async () => {
-    const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: false });
-    const path = calls[0].capture.path;
-    assert.ok(path.includes(encodeURIComponent('*.cls')));
-    assert.ok(path.includes(encodeURIComponent('*.mac')));
-  });
-
-  test('passes sys=0 when includeSystem is false', async () => {
-    const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: false });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'q', sys: false });
     assert.ok(calls[0].capture.path.includes('sys=0'));
   });
 
-  test('passes sys=1 when includeSystem is true', async () => {
+  test('passes sys=1 for true', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: true });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'q', sys: true });
     assert.ok(calls[0].capture.path.includes('sys=1'));
   });
 
-  test('passes gen=0 when includeGenerated is omitted', async () => {
+  test('passes gen=0 by default', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: false });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'q' });
     assert.ok(calls[0].capture.path.includes('gen=0'));
   });
 
-  test('passes gen=1 when includeGenerated is true', async () => {
+  test('passes gen=1 when true', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: false, includeGenerated: true });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'q', gen: true });
     assert.ok(calls[0].capture.path.includes('gen=1'));
   });
 
   test('includes Basic auth header', async () => {
     const calls = installTransport({ result: [] });
-    await search(BASE_CONN, { query: 'x', categories: [], maxResults: 10, includeSystem: false });
+    await new AtelierAPI(BASE_CONN).actionSearch({ query: 'x' });
     const expected = 'Basic ' + Buffer.from('_SYSTEM:SYS').toString('base64');
     assert.strictEqual(calls[0].capture.headers['Authorization'], expected);
   });
 
-  test('returns class match grouped by file with matches array', async () => {
+  test('returns SearchResult array from result', async () => {
     installTransport({
-      result: [
-        { doc: 'My.Package.ClassName.cls', matches: [{ member: 'MyMethod', text: 'findme here' }] },
-      ],
+      result: [{ doc: 'My.Package.ClassName.cls', matches: [{ member: 'MyMethod', text: 'findme here' }] }],
     });
-    const results = await search(BASE_CONN, { query: 'findme', categories: ['CLS'], maxResults: 10, includeSystem: false });
-    assert.strictEqual(results.length, 1);
-    assert.strictEqual(results[0].name, 'My.Package.ClassName.cls');
-    assert.strictEqual(results[0].category, 'CLS');
-    assert.strictEqual(results[0].matches.length, 1);
-    assert.strictEqual(results[0].matches[0].member, 'MyMethod');
-    assert.ok(results[0].matches[0].text.includes('findme'));
+    const resp = await new AtelierAPI(BASE_CONN).actionSearch({ query: 'findme' });
+    const docs = resp.result as Atelier.SearchResult[];
+    assert.strictEqual(docs.length, 1);
+    assert.strictEqual(docs[0].doc, 'My.Package.ClassName.cls');
+    assert.strictEqual(docs[0].matches[0].member, 'MyMethod');
   });
 
-  test('returns routine match with MAC category', async () => {
-    installTransport({
-      result: [
-        { doc: 'MyRoutine.mac', matches: [{ line: 42, text: 'do findme' }] },
-      ],
-    });
-    const results = await search(BASE_CONN, { query: 'findme', categories: ['RTN'], maxResults: 10, includeSystem: false });
-    assert.strictEqual(results[0].name, 'MyRoutine.mac');
-    assert.strictEqual(results[0].category, 'MAC');
-    assert.strictEqual(results[0].matches[0].line, 42);
+  test('throws on application-level error (status.summary)', async () => {
+    _setTransport(async () => ({ status: { summary: 'Some server error', errors: [] }, result: {} }));
+    await assert.rejects(new AtelierAPI(BASE_CONN).actionSearch({ query: 'x' }));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: helpers
+// ---------------------------------------------------------------------------
+
+suite('AtelierAPI > helpers', () => {
+  test('buildFileMasks: empty -> all defaults', () => {
+    assert.deepStrictEqual(buildFileMasks([]), ['*.cls', '*.mac', '*.int', '*.inc']);
   });
 
-  test('groups multiple matches per file under one result entry', async () => {
-    installTransport({
-      result: [{
-        doc: 'Foo.cls',
-        matches: [
-          { member: 'MethodA', text: 'hit one' },
-          { member: 'MethodB', text: 'hit two' },
-        ],
-      }],
-    });
-    const results = await search(BASE_CONN, { query: 'hit', categories: ['CLS'], maxResults: 10, includeSystem: false });
-    assert.strictEqual(results.length, 1);
-    assert.strictEqual(results[0].matches.length, 2);
+  test('buildFileMasks: CLS -> *.cls only', () => {
+    assert.deepStrictEqual(buildFileMasks(['CLS']), ['*.cls']);
   });
 
-  test('returns results for multiple files', async () => {
-    installTransport({
-      result: [
-        { doc: 'My.Class.cls', matches: [{ member: 'Init', text: 'findme here' }] },
-        { doc: 'MyRoutine.mac', matches: [{ line: 10, text: 'findme too' }] },
-      ],
-    });
-    const results = await search(BASE_CONN, { query: 'findme', categories: [], maxResults: 10, includeSystem: false });
-    assert.strictEqual(results.length, 2);
-    assert.strictEqual(results[0].name, 'My.Class.cls');
-    assert.strictEqual(results[1].name, 'MyRoutine.mac');
+  test('buildFileMasks: RTN -> *.mac and *.int', () => {
+    const m = buildFileMasks(['RTN']);
+    assert.ok(m.includes('*.mac') && m.includes('*.int') && !m.includes('*.cls'));
   });
 
-  test('returns empty array and does not throw on transport error', async () => {
-    installErrorTransport(new Error('ECONNREFUSED'));
-    const results = await search(BASE_CONN, { query: 'q', categories: ['CLS'], maxResults: 10, includeSystem: false });
-    assert.deepStrictEqual(results, []);
+  test('buildFileMasks: MAC -> *.mac only', () => {
+    assert.deepStrictEqual(buildFileMasks(['MAC']), ['*.mac']);
   });
+
+  test('buildFileMasks: INC -> *.inc only', () => {
+    assert.deepStrictEqual(buildFileMasks(['INC']), ['*.inc']);
+  });
+
+  test('buildFileMasks: CSP -> *.csp only', () => {
+    assert.deepStrictEqual(buildFileMasks(['CSP']), ['*.csp']);
+  });
+
+  test('buildFileMasks: deduplicates (CLS + PKG -> one *.cls)', () => {
+    assert.strictEqual(buildFileMasks(['CLS', 'PKG']).filter(m => m === '*.cls').length, 1);
+  });
+
+  test('categoryFromDocName: .cls -> CLS', () => { assert.strictEqual(categoryFromDocName('My.Cls.cls'), 'CLS'); });
+  test('categoryFromDocName: .mac -> MAC', () => { assert.strictEqual(categoryFromDocName('Rtn.mac'), 'MAC'); });
+  test('categoryFromDocName: .int -> INT', () => { assert.strictEqual(categoryFromDocName('Rtn.int'), 'INT'); });
+  test('categoryFromDocName: .inc -> INC', () => { assert.strictEqual(categoryFromDocName('My.inc'), 'INC'); });
+  test('categoryFromDocName: .csp -> CSP', () => { assert.strictEqual(categoryFromDocName('/csp/user/page.csp'), 'CSP'); });
+  test('categoryFromDocName: unknown -> OTH', () => { assert.strictEqual(categoryFromDocName('File.obj'), 'OTH'); });
 });
 
 // ---------------------------------------------------------------------------
 // Suite: searchStream
 // ---------------------------------------------------------------------------
 
-suite('IrisSearchService > searchStream', () => {
+suite('AtelierAPI > searchStream', () => {
   let sandbox: sinon.SinonSandbox;
+  setup(() => { sandbox = makeSandbox(); });
+  teardown(() => { sandbox.restore(); _setTransport(undefined); });
 
-  setup(() => {
-    sandbox = sinon.createSandbox();
-    sandbox.stub(vscode.workspace, 'getConfiguration').returns({
-      get: (_key: string, def?: unknown) => def,
-      has: () => false,
-      inspect: () => undefined,
-      update: async () => undefined,
-    } as unknown as vscode.WorkspaceConfiguration);
-  });
-
-  teardown(() => {
-    sandbox.restore();
-    _setTransport(undefined);
-  });
-
-  /** Collect all yielded batches from an async generator. */
-  async function collect(gen: AsyncIterable<ISearchResult[]>): Promise<{ batches: ISearchResult[][], all: ISearchResult[] }> {
-    const batches: ISearchResult[][] = [];
-    for await (const batch of gen) { batches.push(batch); }
+  async function collect(gen: AsyncIterable<Atelier.SearchResult[]>) {
+    const batches: Atelier.SearchResult[][] = [];
+    for await (const b of gen) batches.push(b);
     return { batches, all: batches.flat() };
   }
 
-  // ── v6 async path ─────────────────────────────────────────────────────────
+  // -- v6 async path ---------------------------------------------------------
 
   test('v6: POSTs to /work endpoint when apiVersion >= 6', async () => {
     const calls = installMultiTransport([
-      { result: { content: { api: 6 } } },   // getApiVersion
-      { location: 'USER/work/job1' },          // POST /work
-      { result: [] },                          // GET /work/job1 (done)
+      { result: { content: { api: 6 } } },
+      { result: { location: 'USER/work/job1' } },
+      { result: [] },
     ]);
-    await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(calls[1].capture.method, 'POST');
-    assert.ok(calls[1].capture.path.endsWith('/work'), `path was: ${calls[1].capture.path}`);
+    assert.ok(calls[1].capture.path.endsWith('/work'), `path: ${calls[1].capture.path}`);
   });
 
   test('v6: POST body contains required search parameters', async () => {
     const calls = installMultiTransport([
       { result: { content: { api: 6 } } },
-      { location: 'USER/work/job1' },
+      { result: { location: 'USER/work/job1' } },
       { result: [] },
     ]);
-    await collect(searchStream(BASE_CONN, {
-      query: 'findme', categories: ['CLS'], maxResults: 50,
-      includeSystem: true, includeGenerated: true,
-    }));
-    const body = JSON.parse(calls[1].capture.body!);
+    await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'findme', categories: ['CLS'], maxResults: 50, includeSystem: true, includeGenerated: true }));
+    const body = JSON.parse(calls[1].capture.body as string);
     assert.strictEqual(body.request, 'search');
     assert.strictEqual(body.query, 'findme');
-    assert.ok(body.documents.includes('*.cls'), `documents was: ${body.documents}`);
+    assert.ok(body.documents.includes('*.cls'), 'documents should include *.cls');
     assert.strictEqual(body.max, 50);
     assert.strictEqual(body.system, true);
     assert.strictEqual(body.generated, true);
   });
 
-  test('v6: yields results returned by the poll response', async () => {
+  test('v6: yields SearchResult batches from poll response', async () => {
     installMultiTransport([
       { result: { content: { api: 6 } } },
-      { location: 'USER/work/job1' },
+      { result: { location: 'USER/work/job1' } },
       { result: [{ doc: 'Foo.cls', matches: [{ member: 'Bar', text: 'findme' }] }] },
     ]);
-    const { all } = await collect(searchStream(BASE_CONN, { query: 'findme', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    const { all } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'findme', categories: ['CLS'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(all.length, 1);
-    assert.strictEqual(all[0].name, 'Foo.cls');
-    assert.strictEqual(all[0].category, 'CLS');
+    assert.strictEqual(all[0].doc, 'Foo.cls');
     assert.strictEqual(all[0].matches[0].member, 'Bar');
   });
 
   test('v6: polls again when Retry-After header is present', async () => {
     const calls = installMultiTransport([
       { result: { content: { api: 6 } } },
-      { location: 'USER/work/job1' },
-      { result: [], retryafter: '0.05' },                                         // still running
-      { result: [{ doc: 'Done.cls', matches: [{ text: 'x' }] }] },               // finished
+      { result: { location: 'USER/work/job1' } },
+      { result: [], retryafter: '0.05' },
+      { result: [{ doc: 'Done.cls', matches: [{ text: 'x' }] }] },
     ]);
-    await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
-    const polls = calls.filter(c => c.capture.method === 'GET' && c.capture.path.includes('/work/'));
-    assert.strictEqual(polls.length, 2);
+    await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    assert.strictEqual(calls.filter(c => c.capture.method === 'GET' && c.capture.path.includes('/work/')).length, 2);
   });
 
   test('v6: yields one batch per non-empty poll', async () => {
     installMultiTransport([
       { result: { content: { api: 6 } } },
-      { location: 'USER/work/job1' },
+      { result: { location: 'USER/work/job1' } },
       { result: [{ doc: 'A.cls', matches: [{ text: 'hit' }] }], retryafter: '0.05' },
       { result: [{ doc: 'B.mac', matches: [{ text: 'hit' }] }] },
     ]);
-    const { batches, all } = await collect(searchStream(BASE_CONN, { query: 'hit', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    const { batches, all } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'hit', categories: ['CLS'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(batches.length, 2);
-    assert.strictEqual(all[0].name, 'A.cls');
-    assert.strictEqual(all[1].name, 'B.mac');
+    assert.strictEqual(all[0].doc, 'A.cls');
+    assert.strictEqual(all[1].doc, 'B.mac');
   });
 
   test('v6: skips empty intermediate polls silently', async () => {
     installMultiTransport([
       { result: { content: { api: 6 } } },
-      { location: 'USER/work/job1' },
-      { result: [], retryafter: '0.05' }, // empty + still running → no yield
+      { result: { location: 'USER/work/job1' } },
+      { result: [], retryafter: '0.05' },
       { result: [{ doc: 'C.cls', matches: [{ text: 'ok' }] }] },
     ]);
-    const { batches } = await collect(searchStream(BASE_CONN, { query: 'ok', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    const { batches } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'ok', categories: ['CLS'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(batches.length, 1);
-    assert.strictEqual(batches[0][0].name, 'C.cls');
+    assert.strictEqual(batches[0][0].doc, 'C.cls');
   });
 
-  // ── v1–v5 per-mask fallback ───────────────────────────────────────────────
+  test('v6: falls back to per-mask when /work POST fails (HTTP 404)', async () => {
+    let idx = 0;
+    _setTransport(async () => {
+      idx++;
+      if (idx === 1) return { result: { content: { api: 6 } } };
+      if (idx === 2) throw new Error('IRIS server returned HTTP 404');
+      return { result: [{ doc: 'Fallback.cls', matches: [{ text: 'x' }] }] };
+    });
+    const { all } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    assert.strictEqual(all.length, 1);
+    assert.strictEqual(all[0].doc, 'Fallback.cls');
+  });
 
-  test('v3: falls back to per-mask GET /action/search requests', async () => {
+  test('v6: falls back to per-mask when /work returns status.summary error', async () => {
+    let idx = 0;
+    _setTransport(async () => {
+      idx++;
+      if (idx === 1) return { result: { content: { api: 6 } } };
+      if (idx === 2) return { status: { summary: "ERROR #16004: Unknown request type 'search'", errors: [] }, result: {} };
+      return { result: [{ doc: 'Fallback.cls', matches: [{ text: 'x' }] }] };
+    });
+    const { all } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    assert.strictEqual(all[0].doc, 'Fallback.cls');
+  });
+
+  test('v6: falls back to per-mask when /work returns no job ID', async () => {
+    installMultiTransport([
+      { result: { content: { api: 6 } } },
+      { result: {} },
+      { result: [{ doc: 'Fallback.cls', matches: [{ text: 'x' }] }] },
+    ]);
+    const { all } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    assert.strictEqual(all[0].doc, 'Fallback.cls');
+  });
+
+  // -- v1-v5 per-mask path ---------------------------------------------------
+
+  test('v3: falls back to per-mask GET /action/search', async () => {
     const calls = installMultiTransport([
       { result: { content: { api: 3 } } },
       { result: [{ doc: 'Foo.cls', matches: [{ text: 'x' }] }] },
     ]);
-    await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(calls[1].capture.method, 'GET');
     assert.ok(calls[1].capture.path.includes('/action/search'), `path: ${calls[1].capture.path}`);
   });
@@ -360,36 +365,35 @@ suite('IrisSearchService > searchStream', () => {
   test('v3: sends one request per mask', async () => {
     const calls = installMultiTransport([
       { result: { content: { api: 3 } } },
-      { result: [] }, // *.cls
-      { result: [] }, // *.mac
+      { result: [] },
+      { result: [] },
     ]);
-    await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
-    // calls[0] = version check, calls[1] = *.cls, calls[2] = *.mac
+    await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
     assert.ok(calls[1].capture.path.includes(encodeURIComponent('*.cls')));
     assert.ok(calls[2].capture.path.includes(encodeURIComponent('*.mac')));
   });
 
-  test('v3: yields results for each mask that has matches', async () => {
+  test('v3: yields SearchResult batches for each mask with matches', async () => {
     installMultiTransport([
       { result: { content: { api: 3 } } },
-      { result: [{ doc: 'Foo.cls', matches: [{ text: 'x' }] }] }, // *.cls
-      { result: [{ doc: 'Bar.mac', matches: [{ text: 'x' }] }] }, // *.mac
+      { result: [{ doc: 'Foo.cls', matches: [{ text: 'x' }] }] },
+      { result: [{ doc: 'Bar.mac', matches: [{ text: 'x' }] }] },
     ]);
-    const { batches } = await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
+    const { batches } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(batches.length, 2);
-    assert.strictEqual(batches[0][0].name, 'Foo.cls');
-    assert.strictEqual(batches[1][0].name, 'Bar.mac');
+    assert.strictEqual(batches[0][0].doc, 'Foo.cls');
+    assert.strictEqual(batches[1][0].doc, 'Bar.mac');
   });
 
-  test('v3: skips masks that return no results (no empty batch yielded)', async () => {
+  test('v3: skips masks that return no results', async () => {
     installMultiTransport([
       { result: { content: { api: 3 } } },
-      { result: [] },                                               // *.cls — empty
-      { result: [{ doc: 'My.mac', matches: [{ text: 'x' }] }] },  // *.mac — hit
+      { result: [] },
+      { result: [{ doc: 'My.mac', matches: [{ text: 'x' }] }] },
     ]);
-    const { batches } = await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
+    const { batches } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(batches.length, 1);
-    assert.strictEqual(batches[0][0].name, 'My.mac');
+    assert.strictEqual(batches[0][0].doc, 'My.mac');
   });
 
   test('v3: continues to next mask when one mask throws', async () => {
@@ -400,21 +404,21 @@ suite('IrisSearchService > searchStream', () => {
       if (idx === 2) throw new Error('timeout on *.cls');
       return { result: [{ doc: 'Good.mac', matches: [{ text: 'x' }] }] };
     });
-    const { batches } = await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
+    const { batches } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS', 'MAC'], maxResults: 10, includeSystem: false }));
     assert.strictEqual(batches.length, 1);
-    assert.strictEqual(batches[0][0].name, 'Good.mac');
+    assert.strictEqual(batches[0][0].doc, 'Good.mac');
   });
 
-  // ── apiVersion check fallback ─────────────────────────────────────────────
+  // -- version check fallback ------------------------------------------------
 
-  test('falls back to per-mask when version check throws', async () => {
+  test('falls back to per-mask when serverInfo throws', async () => {
     let idx = 0;
     _setTransport(async () => {
       idx++;
-      if (idx === 1) throw new Error('no /api/atelier/ endpoint'); // version check fails → api = 1
+      if (idx === 1) throw new Error('no /api/atelier/ endpoint');
       return { result: [{ doc: 'Foo.cls', matches: [{ text: 'x' }] }] };
     });
-    const { all } = await collect(searchStream(BASE_CONN, { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
-    assert.strictEqual(all[0].name, 'Foo.cls');
+    const { all } = await collect(searchStream(new AtelierAPI(BASE_CONN), { query: 'x', categories: ['CLS'], maxResults: 10, includeSystem: false }));
+    assert.strictEqual(all[0].doc, 'Foo.cls');
   });
 });

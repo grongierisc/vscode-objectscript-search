@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import type { ISearchResult, ISearchMatch } from './types';
 import { getConnection } from './IrisConnectionService';
-import { searchStream } from './IrisSearchService';
+import { AtelierAPI, searchStream, categoryFromDocName } from './api';
 import { resolveMatchLine } from './matchResolver';
 
 /**
@@ -20,7 +20,7 @@ import { resolveMatchLine } from './matchResolver';
 export function buildObjectScriptUri(
   name: string,
   wsFolderName: string,
-  namespace: string,
+  ns: string,
 ): vscode.Uri {
   const ext = name.split('.').pop() ?? '';
   const stem = name.slice(0, -(ext.length + 1));
@@ -32,7 +32,7 @@ export function buildObjectScriptUri(
     scheme: 'objectscript',
     authority: wsFolderName,
     path: `/${filePath}`,
-    query: `ns=${namespace}`,
+    query: `ns=${ns}`,
   });
 }
 
@@ -131,14 +131,20 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
         includeGenerated,
       };
 
+      const api = new AtelierAPI(connection);
       const serverInfo = connection.serverName ?? connection.host;
       let totalFiles = 0;
       let totalMatches = 0;
 
-      for await (const batch of searchStream(connection, opts)) {
-        totalFiles += batch.length;
-        totalMatches += batch.reduce((n, r) => n + (r.matches?.length ?? 0), 0);
-        this._post({ type: 'appendResults', results: batch, serverInfo, totalFiles, totalMatches });
+      for await (const batch of searchStream(api, opts)) {
+        const results = batch.map((doc) => ({
+          name: doc.doc,
+          category: categoryFromDocName(doc.doc),
+          matches: doc.matches,
+        }));
+        totalFiles += results.length;
+        totalMatches += results.reduce((n, r) => n + (r.matches?.length ?? 0), 0);
+        this._post({ type: 'appendResults', results, serverInfo, totalFiles, totalMatches });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -176,7 +182,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     }
 
     // Build the objectscript:// URI used by vscode-objectscript's DocumentContentProvider.
-    const uri = buildObjectScriptUri(name, wsFolder.name, connection.namespace);
+    const uri = buildObjectScriptUri(name, wsFolder.name, connection.ns);
 
     try {
       await vscode.commands.executeCommand('vscode-objectscript.explorer.open', uri);

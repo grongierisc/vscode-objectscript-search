@@ -96,12 +96,23 @@ async function* searchStreamAsync(
     max: maxResults,
   });
 
-  const queueResp = await makeRequest(connection, 'POST', workPath, body);
+  let queueResp: AtelierQueryResponse;
+  try {
+    queueResp = await makeRequest(connection, 'POST', workPath, body);
+  } catch (err) {
+    // The /work endpoint is absent or doesn't support async search on this server.
+    // Fall back transparently to the per-mask synchronous path.
+    yield* searchStreamPerMask(connection, options);
+    return;
+  }
+
   // The Location header contains the relative URL of the job, e.g. "USER/work/abc123"
   const rawLocation = queueResp.location ?? '';
   const jobId = rawLocation.split('/').filter(Boolean).pop();
   if (!jobId) {
-    throw new Error('[ObjectScript Search] Async search: no job ID returned from server');
+    // Job ID missing — server accepted the request but gave no handle; fall back.
+    yield* searchStreamPerMask(connection, options);
+    return;
   }
 
   // Poll until done, yielding each batch of results
@@ -211,7 +222,7 @@ function categoryFromDocName(docName: string): string {
 
 export function buildPath(connection: IConnection, suffix: string, version = 1): string {
   const prefix = connection.pathPrefix?.replace(/\/$/, '') ?? '';
-  const ns = encodeURIComponent(connection.namespace);
+  const ns = encodeURIComponent(connection.ns);
   return `${prefix}/api/atelier/v${version}/${ns}${suffix}`;
 }
 
@@ -269,7 +280,12 @@ function makeRequest(
   };
 
   if (_transport) {
-    return _transport(capture);
+    return _transport(capture).then((resp) => {
+      if (resp.status?.summary) {
+        throw new Error(resp.status.summary);
+      }
+      return resp;
+    });
   }
 
   return new Promise((resolve, reject) => {
@@ -294,6 +310,11 @@ function makeRequest(
             // Capture async-work headers so callers can handle job IDs and polling.
             if (res.headers.location) { parsed.location = res.headers.location as string; }
             if (res.headers['retry-after']) { parsed.retryafter = res.headers['retry-after'] as string; }
+            // Surface application-level errors embedded in a 2xx response body.
+            if (parsed.status?.summary) {
+              reject(new Error(parsed.status.summary));
+              return;
+            }
             resolve(parsed);
           } catch {
             reject(new Error(`Failed to parse IRIS response: ${raw.substring(0, 200)}`));
@@ -319,6 +340,8 @@ function makeRequest(
 
 export interface AtelierQueryResponse {
   result?: unknown;
+  /** Application-level status returned by the server (present even on HTTP 2xx). */
+  status?: { summary?: string; errors?: unknown[] };
   /** Value of the `Retry-After` response header (GET /work/{id}): truthy = job still running. */
   retryafter?: string;
   /** Value of the `Location` response header (POST /work): relative URL of the queued job. */

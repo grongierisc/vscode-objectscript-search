@@ -68,7 +68,7 @@ export async function getConnection(): Promise<IConnection | undefined> {
         port: info.port,
         scheme: info.scheme || 'http',
         pathPrefix: info.pathPrefix || '',
-        namespace: (info.namespace || 'USER').toUpperCase(),
+        ns: (info.namespace || 'USER').toUpperCase(),
         username: info.username || '_SYSTEM',
         password: password ?? '',
       };
