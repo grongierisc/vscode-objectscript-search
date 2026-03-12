@@ -35,6 +35,136 @@ export function buildObjectScriptUri(
   });
 }
 
+/**
+ * Convert a 1-based absolute line number to a VS Code Range suitable for use
+ * as a `selection` in `showTextDocument`.
+ * Returns `undefined` when `line` is absent, zero, or negative.
+ */
+export function buildLineSelection(line: number | undefined): vscode.Range | undefined {
+  if (line === undefined || line <= 0) return undefined;
+  const pos = new vscode.Position(line - 1, 0);
+  return new vscode.Range(pos, pos);
+}
+
+/**
+ * Resolve an Atelier API match to an absolute VS Code Position within an open
+ * TextDocument (a `.cls` file).
+ *
+ * The `/action/search` endpoint returns `line` and `attrline` as 1-based
+ * offsets counted from the line containing the member's opening `{`:
+ *
+ *   absolute_0based = brace_line_0based + offset
+ *
+ * When no offset is provided but a `member` name is, the position resolves to
+ * the member's declaration line so the editor scrolls to that member.
+ *
+ * Returns `undefined` when the member cannot be found in the document.
+ */
+export function resolveMatchPosition(
+  doc: vscode.TextDocument,
+  member: string | undefined,
+  line: number | undefined,
+  attrline: number | undefined,
+): vscode.Position | undefined {
+  if (!member) return undefined;
+
+  const info = _findMemberBraceInfo(doc, member);
+  if (!info) return undefined;
+
+  const offset = line ?? attrline;
+  if (offset !== undefined && offset > 0) {
+    return new vscode.Position(info.braceLine + offset, 0);
+  }
+  return new vscode.Position(info.declLine, 0);
+}
+
+/**
+ * Scan a TextDocument for a class member matching `member` and return the
+ * 0-based indices of its declaration line and body-opening `{` line.
+ *
+ * Two strategies are tried:
+ *  1. Primary:  `^KEYWORD  memberName` — handles most members (Method, XData…)
+ *  2. Fallback: `^memberName  <anything>` — handles cases where the API returns
+ *     the keyword itself as the member name (e.g. Storage → "Storage Default").
+ */
+function _findMemberBraceInfo(
+  doc: vscode.TextDocument,
+  member: string,
+): { declLine: number; braceLine: number } | undefined {
+  const name = member.split('(')[0];
+  const esc = _escapeRe(name);
+  const primaryRe = new RegExp(
+    `^(ClassMethod|Method|Query|XData|Storage|Property|Index|Parameter|Trigger|Relationship|ForeignKey|Projection|ClassVariable)\\s+${esc}(\\s|\\(|$)`,
+    'i',
+  );
+  // Fallback: member name IS the keyword (e.g. member="Storage" → "Storage Default").
+  const fallbackRe = new RegExp(`^${esc}\\s+\\S`, 'i');
+
+  let fallbackDecl = -1;
+  for (let i = 0; i < doc.lineCount; i++) {
+    const text = doc.lineAt(i).text;
+    if (primaryRe.test(text)) {
+      return _braceFrom(doc, i);
+    }
+    if (fallbackDecl === -1 && fallbackRe.test(text)) {
+      fallbackDecl = i;
+    }
+  }
+  return fallbackDecl !== -1 ? _braceFrom(doc, fallbackDecl) : undefined;
+}
+
+function _braceFrom(
+  doc: vscode.TextDocument,
+  declLine: number,
+): { declLine: number; braceLine: number } {
+  for (let j = declLine; j < Math.min(doc.lineCount, declLine + 40); j++) {
+    if (doc.lineAt(j).text.trim() === '{') {
+      return { declLine, braceLine: j };
+    }
+  }
+  return { declLine, braceLine: declLine };
+}
+
+function _escapeRe(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Try to find a member's declaration line by querying VS Code's document symbol
+ * provider — which vscode-objectscript registers for `objectscript://` documents.
+ * Returns `undefined` if the symbol provider isn't available or the member isn't
+ * found, so callers can fall back to the text-scan approach.
+ */
+async function _findMemberBraceInfoFromSymbols(
+  uri: vscode.Uri,
+  doc: vscode.TextDocument,
+  member: string,
+): Promise<{ declLine: number; braceLine: number } | undefined> {
+  try {
+    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+      'vscode.executeDocumentSymbolProvider',
+      uri,
+    );
+    if (!symbols?.length) return undefined;
+    const targetName = member.split('(')[0].toLowerCase();
+    const flat = _flattenSymbols(symbols);
+    const sym = flat.find(s => s.name.split('(')[0].toLowerCase() === targetName);
+    if (!sym) return undefined;
+    return _braceFrom(doc, sym.range.start.line);
+  } catch {
+    return undefined;
+  }
+}
+
+function _flattenSymbols(syms: vscode.DocumentSymbol[]): vscode.DocumentSymbol[] {
+  const result: vscode.DocumentSymbol[] = [];
+  for (const s of syms) {
+    result.push(s);
+    if (s.children?.length) result.push(..._flattenSymbols(s.children));
+  }
+  return result;
+}
+
 export class SearchViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'ObjectScriptSearch';
 
@@ -62,7 +192,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
           await this._handleSearch(msg.query, msg.categories, msg.includeSystem ?? false, msg.includeGenerated ?? false);
           break;
         case 'openFile':
-          await this._openFile(msg.name, msg.category);
+          await this._openFile(msg.name, msg.category, msg.member, msg.line, msg.attrline);
           break;
       }
     });
@@ -116,7 +246,13 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async _openFile(name: string, _category: string): Promise<void> {
+  private async _openFile(
+    name: string,
+    _category: string,
+    member?: string,
+    line?: number,
+    attrline?: number,
+  ): Promise<void> {
     const connection = await getConnection();
     if (!connection) {
       vscode.window.showErrorMessage('ObjectScript Search: no active connection to open file.');
@@ -139,9 +275,37 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     const uri = buildObjectScriptUri(name, wsFolder.name, connection.namespace);
 
     try {
-      // vscode-objectscript.explorer.open handles objectscript:// URIs and also
-      // triggers extension activation via the "onCommand" activation event.
       await vscode.commands.executeCommand('vscode-objectscript.explorer.open', uri);
+
+      const textDoc = await vscode.workspace.openTextDocument(uri);
+
+      // Resolve the target position in the file.
+      // For .cls files with a member context: line/attrline are offsets from the
+      // member's opening { line.
+      // Primary: use vscode-objectscript's document symbol provider for exact positions.
+      // Fallback: regex text scan (for when the symbol provider isn't available yet).
+      let pos: vscode.Position | undefined;
+      if (member && name.toLowerCase().endsWith('.cls')) {
+        const info =
+          await _findMemberBraceInfoFromSymbols(uri, textDoc, member)
+          ?? _findMemberBraceInfo(textDoc, member);
+        if (info) {
+          const offset = line ?? attrline;
+          pos = offset !== undefined && offset > 0
+            ? new vscode.Position(info.braceLine + offset, 0)
+            : new vscode.Position(info.declLine, 0);
+        }
+      }
+      if (!pos) {
+        const abs = line ?? attrline;
+        if (abs !== undefined && abs > 0) {
+          pos = new vscode.Position(abs - 1, 0);
+        }
+      }
+
+      if (pos) {
+        await vscode.window.showTextDocument(textDoc, { selection: new vscode.Range(pos, pos) });
+      }
     } catch {
       vscode.window.showWarningMessage(
         `ObjectScript Search: cannot open "${name}". ` +
@@ -577,7 +741,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
           const loc = document.createElement('span');
           loc.className = 'match-loc';
-          loc.textContent = m.member || m.line || '';
+          loc.textContent = String(m.line ?? m.attrline ?? m.member ?? '');
 
           const text = document.createElement('span');
           text.className = 'match-text';
@@ -586,7 +750,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
           li.appendChild(loc);
           li.appendChild(text);
           li.addEventListener('click', () =>
-            vscode.postMessage({ type: 'openFile', name: r.name, category: r.category }),
+            vscode.postMessage({ type: 'openFile', name: r.name, category: r.category, member: m.member, line: m.line, attrline: m.attrline }),
           );
           list.appendChild(li);
         }
@@ -646,4 +810,4 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
 type WebviewMessage =
   | { type: 'search'; query: string; categories: string[]; includeSystem?: boolean; includeGenerated?: boolean }
-  | { type: 'openFile'; name: string; category: string };
+  | { type: 'openFile'; name: string; category: string; member?: string; line?: number; attrline?: number };

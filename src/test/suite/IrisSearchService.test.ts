@@ -189,13 +189,13 @@ suite('IrisSearchService > search', () => {
   test('returns routine match with MAC category', async () => {
     installTransport({
       result: [
-        { doc: 'MyRoutine.mac', matches: [{ line: '42', text: 'do findme' }] },
+        { doc: 'MyRoutine.mac', matches: [{ line: 42, text: 'do findme' }] },
       ],
     });
     const results = await search(BASE_CONN, { query: 'findme', categories: ['RTN'], maxResults: 10, includeSystem: false });
     assert.strictEqual(results[0].name, 'MyRoutine.mac');
     assert.strictEqual(results[0].category, 'MAC');
-    assert.strictEqual(results[0].matches[0].line, '42');
+    assert.strictEqual(results[0].matches[0].line, 42);
   });
 
   test('groups multiple matches per file under one result entry', async () => {
@@ -217,7 +217,7 @@ suite('IrisSearchService > search', () => {
     installTransport({
       result: [
         { doc: 'My.Class.cls', matches: [{ member: 'Init', text: 'findme here' }] },
-        { doc: 'MyRoutine.mac', matches: [{ line: '10', text: 'findme too' }] },
+        { doc: 'MyRoutine.mac', matches: [{ line: 10, text: 'findme too' }] },
       ],
     });
     const results = await search(BASE_CONN, { query: 'findme', categories: [], maxResults: 10, includeSystem: false });

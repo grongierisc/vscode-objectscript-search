@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as sinon from 'sinon';
 import * as vscode from 'vscode';
-import { buildObjectScriptUri } from '../../SearchViewProvider';
+import { buildObjectScriptUri, buildLineSelection, resolveMatchPosition } from '../../SearchViewProvider';
 
 // ---------------------------------------------------------------------------
 // Suite: buildObjectScriptUri
@@ -84,6 +84,154 @@ suite('SearchViewProvider > buildObjectScriptUri', () => {
     assert.strictEqual(uri.authority, 'myFolder');
     assert.strictEqual(uri.path, '/My/Package/ClassName.cls');
     assert.ok(uri.query.includes('ns=IRISAPP'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: buildLineSelection
+// ---------------------------------------------------------------------------
+
+suite('SearchViewProvider > buildLineSelection', () => {
+  test('returns undefined for undefined input', () => {
+    assert.strictEqual(buildLineSelection(undefined), undefined);
+  });
+
+  test('returns undefined for 0', () => {
+    assert.strictEqual(buildLineSelection(0), undefined);
+  });
+
+  test('returns undefined for negative line', () => {
+    assert.strictEqual(buildLineSelection(-5), undefined);
+  });
+
+  test('converts line 1 to zero-based position (0, 0)', () => {
+    const range = buildLineSelection(1)!;
+    assert.ok(range, 'expected a Range');
+    assert.strictEqual(range.start.line, 0);
+    assert.strictEqual(range.start.character, 0);
+  });
+
+  test('converts line 42 to zero-based position (41, 0)', () => {
+    const range = buildLineSelection(42)!;
+    assert.ok(range, 'expected a Range');
+    assert.strictEqual(range.start.line, 41);
+    assert.strictEqual(range.start.character, 0);
+  });
+
+  test('start and end of range are identical (collapsed cursor)', () => {
+    const range = buildLineSelection(10)!;
+    assert.ok(range.start.isEqual(range.end));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: resolveMatchPosition
+// ---------------------------------------------------------------------------
+
+suite('SearchViewProvider > resolveMatchPosition', () => {
+  /** Build a minimal fake TextDocument from an array of lines. */
+  function makeDoc(lines: string[]): vscode.TextDocument {
+    return {
+      lineCount: lines.length,
+      lineAt: (i: number) => ({ text: lines[i] } as vscode.TextLine),
+    } as unknown as vscode.TextDocument;
+  }
+
+  test('returns undefined when member is undefined', () => {
+    const doc = makeDoc(['ClassMethod Foo() As %Status', '{', '  Set x = 1', '}']);
+    assert.strictEqual(resolveMatchPosition(doc, undefined, 1, undefined), undefined);
+  });
+
+  test('returns undefined when member is not found in document', () => {
+    const doc = makeDoc(['ClassMethod Foo() As %Status', '{', '  Set x = 1', '}']);
+    assert.strictEqual(resolveMatchPosition(doc, 'Bar', 1, undefined), undefined);
+  });
+
+  test('navigates to brace + line offset for a ClassMethod', () => {
+    const doc = makeDoc([
+      'ClassMethod clean() As %Status',  // line 0: decl
+      '{',                               // line 1: brace
+      '  Do ##class(Foo).Bar()',         // line 2: body line 1
+      '  Quit $$$OK',                    // line 3: body line 2
+      '}',
+    ]);
+    const pos = resolveMatchPosition(doc, 'clean', 1, undefined)!;
+    assert.ok(pos, 'expected a Position');
+    assert.strictEqual(pos.line, 2); // brace(1) + offset(1) = 2
+    assert.strictEqual(pos.character, 0);
+  });
+
+  test('uses attrline when line is absent', () => {
+    const doc = makeDoc([
+      'XData MyData',            // line 0: decl
+      '{',                       // line 1: brace
+      '  <?xml version="1.0"?>', // line 2: attrline 1
+      '  <root>',                // line 3: attrline 2
+      '  <item>foo</item>',      // line 4: attrline 3
+      '  </root>',
+      '}',
+    ]);
+    const pos = resolveMatchPosition(doc, 'MyData', undefined, 3)!;
+    assert.ok(pos, 'expected a Position');
+    assert.strictEqual(pos.line, 4); // brace(1) + attrline(3) = 4
+  });
+
+  test('prefers line over attrline when both are provided', () => {
+    const doc = makeDoc(['XData MyData', '{', '  line 1', '  line 2', '  line 3']);
+    const pos = resolveMatchPosition(doc, 'MyData', 2, 99)!;
+    assert.ok(pos);
+    assert.strictEqual(pos.line, 3); // uses line(2), not attrline(99): brace(1)+2=3
+  });
+
+  test('navigates to declaration line when no offset is given', () => {
+    const doc = makeDoc([
+      'ClassMethod Populate() As %Status',  // line 0
+      '{',
+      '  Set x = 1',
+      '}',
+    ]);
+    const pos = resolveMatchPosition(doc, 'Populate', undefined, undefined)!;
+    assert.ok(pos, 'expected a Position');
+    assert.strictEqual(pos.line, 0); // declaration line
+  });
+
+  test('handles multi-line method signature before opening brace', () => {
+    const doc = makeDoc([
+      'ClassMethod BigMethod(',     // line 0: decl
+      '  pArg1 As %String,',        // line 1
+      '  pArg2 As %String)',        // line 2
+      '{',                          // line 3: brace
+      '  Do something',             // line 4: body line 1
+      '}',
+    ]);
+    const pos = resolveMatchPosition(doc, 'BigMethod', 1, undefined)!;
+    assert.ok(pos);
+    assert.strictEqual(pos.line, 4); // brace(3) + offset(1) = 4
+  });
+
+  test('handles Storage fallback (API returns keyword as member name)', () => {
+    const doc = makeDoc([
+      'Storage Default',                    // line 0: keyword=Storage, name=Default
+      '{',                                  // line 1: brace
+      '<DataLocation>^AppD</DataLocation>', // line 2: attrline 1
+      '<DefaultData>AppData</DefaultData>',
+      '}',
+    ]);
+    const pos = resolveMatchPosition(doc, 'Storage', undefined, 1)!;
+    assert.ok(pos, 'expected a Position for Storage fallback');
+    assert.strictEqual(pos.line, 2); // brace(1) + attrline(1) = 2
+  });
+
+  test('Query member keyword is recognized', () => {
+    const doc = makeDoc([
+      'Query ListItems() As %SQLQuery',  // line 0
+      '{',                               // line 1
+      'SELECT Code FROM Items',          // line 2: body line 1
+      '}',
+    ]);
+    const pos = resolveMatchPosition(doc, 'ListItems', 1, undefined)!;
+    assert.ok(pos);
+    assert.strictEqual(pos.line, 2);
   });
 });
 

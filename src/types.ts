@@ -23,7 +23,12 @@ export interface ISearchOptions {
 export interface ISearchMatch {
   text: string;
   member?: string;
-  line?: string;
+  /** Attribute path within a member (e.g. "Default,DataLocation" for Storage). */
+  attr?: string;
+  /** 1-based offset from the member's opening `{` line (code body matches). */
+  line?: number;
+  /** 1-based offset from the member's opening `{` line (XData/Storage body matches). */
+  attrline?: number;
 }
 
 export interface ISearchResult {
