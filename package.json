@@ -31,6 +31,7 @@
     "views": {
       "intersystems-community_servermanager": [
         {
+          "type": "webview",
           "id": "ObjectScriptSearch",
           "name": "Search",
           "contextualTitle": "ObjectScript Search",
@@ -45,53 +46,21 @@
         "category": "ObjectScript"
       },
       {
-        "command": "objectscriptSearch.search",
-        "title": "Search\u2026",
-        "icon": "$(search)",
-        "category": "ObjectScript"
-      },
-      {
         "command": "objectscriptSearch.showFilters",
         "title": "Filters\u2026",
         "icon": "$(filter)",
         "category": "ObjectScript"
-      },
-      {
-        "command": "objectscriptSearch.clear",
-        "title": "Clear Results",
-        "icon": "$(clear-all)",
-        "category": "ObjectScript"
-      },
-      {
-        "command": "objectscriptSearch.openFile",
-        "title": "Open File"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "objectscriptSearch.search",
-          "when": "view == ObjectScriptSearch",
-          "group": "navigation@1"
-        },
-        {
           "command": "objectscriptSearch.showFilters",
           "when": "view == ObjectScriptSearch",
-          "group": "navigation@2"
-        },
-        {
-          "command": "objectscriptSearch.clear",
-          "when": "view == ObjectScriptSearch && objectscriptSearch.hasResults",
-          "group": "navigation@3"
+          "group": "navigation@1"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "ObjectScriptSearch",
-        "contents": "Click $(search) to search the active IRIS server.\n[Search\u2026](command:objectscriptSearch.search)"
-      }
-    ],
     "configuration": {
       "title": "ObjectScript Search",
       "properties": {
