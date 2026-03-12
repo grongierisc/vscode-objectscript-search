@@ -54,26 +54,41 @@ export async function getConnection(): Promise<IConnection | undefined> {
     if (conn?.active !== true) continue;
 
     try {
-      const info = await api.asyncServerForUri(folder.uri);
+      let info = await api.asyncServerForUri(folder.uri);
       if (!info.active || !info.host || !info.port) continue;
 
       let password = info.password;
 
       // Named servers store their password in the OS keychain via Server Manager.
       // asyncServerForUri intentionally omits it unless stored as plaintext in settings.
-      // Use getServerSpec to resolve credentials (including prompting if needed),
-      // then fall back to a direct auth-provider lookup with an account hint.
+      // Mirror vscode-objectscript's resolvePassword(): getServerSpec to get the account
+      // hint, then try silent auth, then prompt with createIfNone if silent fails.
       if (!password && info.serverName && smApi) {
         const serverSpec = await smApi.getServerSpec(info.serverName, folder).then(s => s, () => undefined);
+        // getServerSpec may already have the password for plaintext settings
         password = serverSpec?.password;
 
         if (!password) {
           const account = serverSpec ? smApi.getAccount(serverSpec) : undefined;
           const scopes = [info.serverName, info.username ?? ''];
-          const session = await vscode.authentication
+
+          // Try silently first (session likely cached if vscode-objectscript already connected)
+          let session = await vscode.authentication
             .getSession(SM_AUTH_PROVIDER_ID, scopes, { silent: true, account })
             .then(s => s, () => undefined);
+
+          // If no cached session, prompt the user — exactly as vscode-objectscript does
+          if (!session) {
+            session = await vscode.authentication
+              .getSession(SM_AUTH_PROVIDER_ID, scopes, { createIfNone: true, account })
+              .then(s => s, () => undefined);
+          }
+
           password = session?.accessToken;
+          // Session may report the actual username (e.g. when settings had no username)
+          if (session && !info.username) {
+            info = { ...info, username: session.scopes[1] || info.username };
+          }
         }
       }
 
