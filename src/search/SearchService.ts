@@ -1,55 +1,24 @@
 import * as vscode from 'vscode';
-import type { ISearchMatch, ISearchResult, DocCategory } from './types';
-import { getConnection } from './IrisConnectionService';
-import { AtelierAPI, searchStream, categoryFromDocName } from './api';
-import { resolveMatchLine } from './matchResolver';
-
-/**
- * Build the `objectscript://` URI used by vscode-objectscript's
- * DocumentContentProvider to open a server-side document.
- *
- * - `.cls` files:  `My.Package.ClassName.cls` → `/My/Package/ClassName.cls`
- * - other files:   `MyRoutine.mac`            → `/MyRoutine.mac`
- *
- * @param name          Full document name, e.g. "My.Package.ClassName.cls"
- * @param wsFolderName  Workspace folder name — becomes the URI authority so
- *                      vscode-objectscript can find the server settings.
- * @param namespace     IRIS namespace, e.g. "IRISAPP"
- */
-export function buildObjectScriptUri(
-  name: string,
-  wsFolderName: string,
-  ns: string,
-): vscode.Uri {
-  const ext = name.split('.').pop() ?? '';
-  const stem = name.slice(0, -(ext.length + 1));
-  const filePath = ext.toLowerCase() === 'cls'
-    ? stem.replace(/\./g, '/') + '.' + ext
-    : name;
-
-  return vscode.Uri.from({
-    scheme: 'objectscript',
-    authority: wsFolderName,
-    path: `/${filePath}`,
-    query: `ns=${ns}`,
-  });
-}
+import type { ISearchMatch, ISearchResult, DocCategory, IConnection } from '../types';
+import { getConnection } from '../connection/IrisConnectionService';
+import { AtelierAPI, searchStream, categoryFromDocName } from '../atelier';
+import { buildObjectScriptUri } from '../utils/uri';
+import { resolveMatchLine } from '../utils/matchResolver';
 
 /**
  * Encapsulates IRIS search and document-open business logic, decoupled from
- * the VS Code WebviewViewProvider machinery.  Mirrors the separation of
- * concerns used by TextSearchProvider in vscode-objectscript: the provider
- * owns the VS Code API surface while this service owns the Atelier API calls,
- * connection resolution, and sync/async path switching.
+ * the VS Code WebviewViewProvider machinery.
  */
 export class SearchService {
   /**
    * Runs a streaming search against the active IRIS server, calling
    * `onBatch` for each batch of results as they arrive.
    *
-   * Throws if no active ObjectScript connection is found.
+   * Accepts a pre-resolved `connection` so the caller avoids a redundant
+   * `getConnection()` call when it has already checked the connection.
    */
   async runSearch(
+    connection: IConnection,
     query: string,
     categories: string[],
     includeSystem: boolean,
@@ -64,14 +33,6 @@ export class SearchService {
       totalMatches: number,
     ) => void,
   ): Promise<void> {
-    const connection = await getConnection();
-    if (!connection) {
-      throw new Error(
-        'No active ObjectScript connection found.\n\n' +
-        'Add a server in "intersystems.servers" and set "objectscript.conn" in your workspace settings.',
-      );
-    }
-
     const cfg = vscode.workspace.getConfiguration('objectscriptSearch');
     const maxResults = cfg.get<number>('maxResults', 100);
 
@@ -101,6 +62,11 @@ export class SearchService {
       totalMatches += results.reduce((n, r) => n + (r.matches?.length ?? 0), 0);
       onBatch(results, serverInfo, totalFiles, totalMatches);
     }
+
+    // Signal completion when no documents matched the query.
+    if (totalFiles === 0) {
+      onBatch([], serverInfo, 0, 0);
+    }
   }
 
   /**
@@ -123,8 +89,8 @@ export class SearchService {
       return;
     }
 
-    const wsFolder = this.findActiveObjectScriptFolder();
-    if (!wsFolder) {
+    const wsFolderName = connection.wsFolderName;
+    if (!wsFolderName) {
       vscode.window.showErrorMessage(
         'ObjectScript Search: no workspace folder with an active ObjectScript connection found. ' +
         'Open a folder and configure "objectscript.conn" in its settings.',
@@ -132,7 +98,7 @@ export class SearchService {
       return;
     }
 
-    const uri = buildObjectScriptUri(name, wsFolder.name, connection.ns);
+    const uri = buildObjectScriptUri(name, wsFolderName, connection.ns);
 
     try {
       await vscode.commands.executeCommand('vscode-objectscript.explorer.open', uri);
@@ -157,18 +123,5 @@ export class SearchService {
         'Make sure the InterSystems ObjectScript extension is installed and active.',
       );
     }
-  }
-
-  /** Returns the first workspace folder whose objectscript.conn is active. */
-  findActiveObjectScriptFolder(): vscode.WorkspaceFolder | undefined {
-    for (const wf of vscode.workspace.workspaceFolders ?? []) {
-      const conn = vscode.workspace
-        .getConfiguration('objectscript', wf)
-        .get<Record<string, unknown>>('conn');
-      if (conn?.active === true) {
-        return wf;
-      }
-    }
-    return undefined;
   }
 }

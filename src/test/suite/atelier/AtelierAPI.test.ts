@@ -9,9 +9,9 @@ import {
   categoryFromDocName,
   _setTransport,
   Atelier,
-} from '../../api';
-import type { RequestCapture } from '../../api';
-import type { IConnection } from '../../types';
+} from '../../../atelier';
+import type { RequestCapture } from '../../../atelier';
+import type { IConnection } from '../../../types';
 
 const BASE_CONN: IConnection = {
   host: 'localhost',

@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as sinon from 'sinon';
 import * as vscode from 'vscode';
-import { getConnection } from '../../IrisConnectionService';
+import { getConnection } from '../../../connection/IrisConnectionService';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,9 +35,6 @@ function makeServerInfo(overrides: Partial<{
 
 /**
  * Stub workspace folders + objectscript.conn + the vscode-objectscript extension.
- * The simplified IrisConnectionService no longer uses the Server Manager extension
- * API directly — only the auth provider constant (a string) — so no SM extension
- * stub is needed here.
  */
 function setupEnv(
   sandbox: sinon.SinonSandbox,
@@ -152,6 +149,12 @@ suite('IrisConnectionService > getConnection', () => {
     setupEnv(sandbox, { serverInfo: makeServerInfo({ username: '' }) });
     const result = await getConnection();
     assert.strictEqual(result?.username, '_SYSTEM');
+  });
+
+  test('populates wsFolderName from the active workspace folder', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo() });
+    const result = await getConnection();
+    assert.strictEqual(result?.wsFolderName, 'myFolder');
   });
 
   // ── inactive connection in result ─────────────────────────────────────────
@@ -326,12 +329,10 @@ suite('IrisConnectionService > getConnection', () => {
 
   // ── multiple workspace folders ────────────────────────────────────────────
 
-  /** Build a fake WorkspaceFolder. */
   function makeFolder(name: string, path: string): vscode.WorkspaceFolder {
     return { index: 0, name, uri: vscode.Uri.file(path) };
   }
 
-  /** Stub extensions.getExtension to expose a per-URI asyncServerForUri map. */
   function stubMultiFolderEnv(
     sandbox: sinon.SinonSandbox,
     folders: vscode.WorkspaceFolder[],

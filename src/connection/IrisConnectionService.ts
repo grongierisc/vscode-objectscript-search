@@ -1,8 +1,13 @@
 import * as vscode from 'vscode';
-import type { IConnection } from './types';
+import type { IConnection } from '../types';
 import { AUTHENTICATION_PROVIDER as SM_AUTH_PROVIDER_ID } from '@intersystems-community/intersystems-servermanager';
 
 const OBJECTSCRIPT_EXT_ID = 'intersystems-community.vscode-objectscript';
+
+/** Error message shown when no active ObjectScript connection is found. */
+export const NO_CONNECTION_MSG =
+  'No active ObjectScript connection found.\n\n' +
+  'Add a server in "intersystems.servers" and set "objectscript.conn" in your workspace settings.';
 
 /** Subset of the vscode-objectscript public API that we consume. */
 interface ObjectScriptExtAPI {
@@ -32,6 +37,9 @@ interface ObjectScriptExtAPI {
  * in the OS keychain. We retrieve them via the Server Manager auth provider,
  * prompting the user if no cached session exists — mirroring what
  * vscode-objectscript itself does in `resolvePassword()`.
+ *
+ * The returned `IConnection` includes `wsFolderName` so callers don't need
+ * a separate workspace-folder scan.
  */
 export async function getConnection(): Promise<IConnection | undefined> {
   const ext = vscode.extensions.getExtension<ObjectScriptExtAPI>(OBJECTSCRIPT_EXT_ID);
@@ -82,6 +90,7 @@ export async function getConnection(): Promise<IConnection | undefined> {
         ns: (info.namespace || 'USER').toUpperCase(),
         username: info.username || '_SYSTEM',
         password: password ?? '',
+        wsFolderName: folder.name,
       };
     } catch {
       continue;
@@ -90,4 +99,3 @@ export async function getConnection(): Promise<IConnection | undefined> {
 
   return undefined;
 }
-

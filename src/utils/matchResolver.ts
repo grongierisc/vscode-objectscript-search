@@ -16,7 +16,7 @@
  * contributors: https://github.com/intersystems-community/vscode-objectscript
  */
 
-import type { ISearchMatch } from './types';
+import type { ISearchMatch } from '../types';
 
 // ---------------------------------------------------------------------------
 // Internal helpers

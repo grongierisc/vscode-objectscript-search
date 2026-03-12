@@ -1,16 +1,21 @@
 import * as vscode from 'vscode';
-import { SearchViewProvider } from './SearchViewProvider';
+import { SearchTreeProvider } from './search/SearchTreeProvider';
+import { SearchService } from './search/SearchService';
 
 export function activate(context: vscode.ExtensionContext): void {
-  const provider = new SearchViewProvider(context.extensionUri);
+  const searchService = new SearchService();
+  const provider = new SearchTreeProvider(context, searchService);
 
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider(SearchViewProvider.viewType, provider, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
-    vscode.commands.registerCommand('objectscriptSearch.showFilters', () => provider.showFilters()),
-    vscode.commands.registerCommand('vscode-objectscript-search.focus', () =>
-      vscode.commands.executeCommand('ObjectScriptSearch.focus'),
+    provider,
+    vscode.window.registerTreeDataProvider(SearchTreeProvider.viewType, provider),
+    vscode.commands.registerCommand('objectscriptSearch.search',      () => provider.search()),
+    vscode.commands.registerCommand('objectscriptSearch.showOptions',  () => provider.showOptions()),
+    vscode.commands.registerCommand('objectscriptSearch.clearResults', () => provider.clearResults()),
+    vscode.commands.registerCommand(
+      'objectscriptSearch.openFile',
+      (name: string, category: string, member?: string, line?: number, attrline?: number, attr?: string, text?: string) =>
+        searchService.openDocument(name, category, member, line, attrline, attr, text),
     ),
   );
 }

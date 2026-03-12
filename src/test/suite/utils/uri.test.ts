@@ -1,11 +1,7 @@
 import * as assert from 'assert';
-import { buildObjectScriptUri } from '../../SearchService';
+import { buildObjectScriptUri } from '../../../utils/uri';
 
-// ---------------------------------------------------------------------------
-// Suite: buildObjectScriptUri
-// ---------------------------------------------------------------------------
-
-suite('SearchViewProvider > buildObjectScriptUri', () => {
+suite('utils > buildObjectScriptUri', () => {
   // ── scheme ────────────────────────────────────────────────────────────────
 
   test('uses objectscript scheme', () => {

@@ -31,7 +31,6 @@
     "views": {
       "intersystems-community_servermanager": [
         {
-          "type": "webview",
           "id": "ObjectScriptSearch",
           "name": "Search",
           "contextualTitle": "ObjectScript Search",
@@ -39,25 +38,54 @@
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "ObjectScriptSearch",
+        "contents": "No active ObjectScript connection.\n\nOpen a workspace folder and ensure `objectscript.conn` is configured.\n[Open Workspace Settings](command:workbench.action.openWorkspaceSettings)",
+        "when": "!objectscriptSearch.connected"
+      },
+      {
+        "view": "ObjectScriptSearch",
+        "contents": "$(search) [Click to search\u2026](command:objectscriptSearch.search)\n\nUse [Options\u2026](command:objectscriptSearch.showOptions) to configure file types and match behaviour.",
+        "when": "objectscriptSearch.connected"
+      }
+    ],
     "commands": [
       {
-        "command": "vscode-objectscript-search.focus",
-        "title": "Open Search",
+        "command": "objectscriptSearch.search",
+        "title": "Search\u2026",
+        "icon": "$(search)",
         "category": "ObjectScript"
       },
       {
-        "command": "objectscriptSearch.showFilters",
-        "title": "Filters\u2026",
+        "command": "objectscriptSearch.showOptions",
+        "title": "Options\u2026",
         "icon": "$(filter)",
+        "category": "ObjectScript"
+      },
+      {
+        "command": "objectscriptSearch.clearResults",
+        "title": "Clear Results",
+        "icon": "$(clear-all)",
         "category": "ObjectScript"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "objectscriptSearch.showFilters",
-          "when": "view == ObjectScriptSearch",
+          "command": "objectscriptSearch.search",
+          "when": "view == ObjectScriptSearch && objectscriptSearch.connected",
           "group": "navigation@1"
+        },
+        {
+          "command": "objectscriptSearch.showOptions",
+          "when": "view == ObjectScriptSearch",
+          "group": "navigation@2"
+        },
+        {
+          "command": "objectscriptSearch.clearResults",
+          "when": "view == ObjectScriptSearch",
+          "group": "navigation@3"
         }
       ]
     },
@@ -107,5 +135,7 @@
     "webpack": "^5.80.0",
     "webpack-cli": "^5.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@intersystems-community/intersystems-servermanager": "^3.10.2"
+  }
 }

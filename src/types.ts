@@ -1,4 +1,4 @@
-import type { SearchMatch } from './api/atelier';
+import type { SearchMatch } from './atelier/types';
 
 export type DocCategory = 'CLS' | 'RTN' | 'MAC' | 'INT' | 'INC' | 'PKG' | 'CSP';
 
@@ -12,6 +12,8 @@ export interface IConnection {
   ns: string;
   username: string;
   password: string;
+  /** Name of the workspace folder from which this connection was resolved. */
+  wsFolderName?: string;
 }
 
 export interface ISearchOptions {

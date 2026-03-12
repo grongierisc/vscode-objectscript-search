@@ -1,6 +1,6 @@
 import * as assert from 'assert';
-import { resolveMatchLine } from '../../matchResolver';
-import type { ISearchMatch } from '../../types';
+import { resolveMatchLine } from '../../../utils/matchResolver';
+import type { ISearchMatch } from '../../../types';
 
 // ---------------------------------------------------------------------------
 // Suite: matchResolver > resolveMatchLine
@@ -8,7 +8,7 @@ import type { ISearchMatch } from '../../types';
 // Logic ported from vscode-objectscript's TextSearchProvider.ts.
 // ---------------------------------------------------------------------------
 
-suite('matchResolver > resolveMatchLine', () => {
+suite('utils > resolveMatchLine', () => {
   // ── ClassMethod body (member + line) ───────────────────────────────────────
 
   test('ClassMethod body: returns memend + line', () => {
@@ -114,11 +114,6 @@ suite('matchResolver > resolveMatchLine', () => {
       '  Quit 1',
       '}',
     ];
-    // attrline=1 → first description line (index 0)?
-    // descLineToDocLine: scan back from line 1 (memberLine-1=1):
-    //   content[1] starts with /// → continue
-    //   content[0] starts with /// → i===0, result=-1, break
-    // return -1 + 1 = 0
     const match: ISearchMatch = { text: 'First', member: 'Foo', attr: 'Description', attrline: 1 };
     assert.strictEqual(resolveMatchLine(content, match, 'My.cls', false), 0);
   });
@@ -161,7 +156,6 @@ suite('matchResolver > resolveMatchLine', () => {
       '</Data>',                                       // 4
       '}',
     ];
-    // member='Storage', attr='Default,DataLocation', no attrline
     const match: ISearchMatch = {
       text: '^MyGlobal',
       member: 'Storage',
@@ -179,7 +173,6 @@ suite('matchResolver > resolveMatchLine', () => {
       '  Quit 1',
       '}',
     ];
-    // No `line` set — initial line=null, member scan finds nothing → null
     const match: ISearchMatch = { text: 'Bar', member: 'Bar' };
     assert.strictEqual(resolveMatchLine(content, match, 'My.cls', false), null);
   });
@@ -188,13 +181,6 @@ suite('matchResolver > resolveMatchLine', () => {
 
   test('attr=IncludeCode: finds Include line', () => {
     const content = [
-      'Class My.Cls',
-      '{',
-      'Include %occInclude',              // 2  ← not how it works, let's use correct format
-      '}',
-    ];
-    // ObjectScript Include appears at top of file:
-    const content2 = [
       'Include MyMacros',                // 0
       '',
       'Class My.Cls',
@@ -202,7 +188,7 @@ suite('matchResolver > resolveMatchLine', () => {
       '}',
     ];
     const match: ISearchMatch = { text: 'MyMacros', attr: 'IncludeCode' };
-    assert.strictEqual(resolveMatchLine(content2, match, 'My.Cls.cls', false), 0);
+    assert.strictEqual(resolveMatchLine(content, match, 'My.Cls.cls', false), 0);
   });
 
   test('attr=Import: finds Import line', () => {
@@ -247,7 +233,6 @@ suite('matchResolver > resolveMatchLine', () => {
 
   test('CSP file: subtracts 1 from line (1-based API → 0-based)', () => {
     const content = ['<html>', '<body>', '<p>hello</p>', '</body>', '</html>'];
-    // For CSP files the Atelier API returns 1-based line numbers
     const match: ISearchMatch = { text: 'hello', line: 3 };
     assert.strictEqual(resolveMatchLine(content, match, '/csp/user/page.csp', false), 2);
   });

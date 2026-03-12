@@ -11,14 +11,19 @@ export function run(): Promise<void> {
 
   const testsRoot = path.resolve(__dirname, '.');
 
+  function addFiles(dir: string): void {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        addFiles(path.join(dir, entry.name));
+      } else if (entry.name.endsWith('.test.js')) {
+        mocha.addFile(path.join(dir, entry.name));
+      }
+    }
+  }
+
   return new Promise((resolve, reject) => {
     try {
-      const files = fs
-        .readdirSync(testsRoot)
-        .filter((f) => f.endsWith('.test.js'));
-
-      files.forEach((f) => mocha.addFile(path.join(testsRoot, f)));
-
+      addFiles(testsRoot);
       mocha.run((failures) => {
         if (failures > 0) {
           reject(new Error(`${failures} test(s) failed.`));
