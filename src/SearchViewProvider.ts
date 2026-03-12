@@ -1,160 +1,123 @@
 import * as vscode from 'vscode';
-import type { ISearchResult } from './types';
 import { getConnection } from './IrisConnectionService';
 import { SearchService } from './SearchService';
 
-// ---------------------------------------------------------------------------
-// Tree item types
-// ---------------------------------------------------------------------------
+// Webview resources live in media/ (not bundled by webpack)
+const MEDIA_CSS = 'search.css';
+const MEDIA_JS  = 'search.js';
 
-class FileResultItem extends vscode.TreeItem {
-  readonly result: ISearchResult;
-
-  constructor(result: ISearchResult) {
-    super(result.name, vscode.TreeItemCollapsibleState.Expanded);
-    this.result = result;
-    const n = result.matches?.length ?? 0;
-    this.description = `${n} ${n === 1 ? 'match' : 'matches'}`;
-    this.tooltip = result.name;
-    this.iconPath = new vscode.ThemeIcon(_categoryIcon(result.category));
-    this.contextValue = 'fileResult';
-  }
-}
-
-class MatchResultItem extends vscode.TreeItem {
-  constructor(
-    match: ISearchResult['matches'][number],
-    fileName: string,
-    fileCategory: string,
-  ) {
-    const label = match.text.trim() || '(empty)';
-    super(label, vscode.TreeItemCollapsibleState.None);
-    const loc = match.line ?? match.attrline ?? match.member ?? '';
-    this.description = String(loc);
-    this.tooltip = label;
-    this.command = {
-      command: 'objectscriptSearch.openFile',
-      title: 'Open',
-      arguments: [fileName, fileCategory, match],
-    };
-    this.contextValue = 'matchResult';
-  }
-}
-
-type SearchTreeItem = FileResultItem | MatchResultItem;
-
-function _categoryIcon(cat: string): string {
-  const map: Record<string, string> = {
-    CLS: 'symbol-class',
-    MAC: 'file-code',
-    INT: 'file-code',
-    INC: 'code',
-    CSP: 'globe',
-    PKG: 'package',
-    RTN: 'symbol-misc',
-  };
-  return map[cat.toUpperCase()] ?? 'file';
-}
-
-// ---------------------------------------------------------------------------
-// Provider — pure VS Code native UI, zero HTML
-// ---------------------------------------------------------------------------
-
-export class SearchViewProvider implements vscode.TreeDataProvider<SearchTreeItem> {
+export class SearchViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'ObjectScriptSearch';
 
-  private readonly _onDidChangeTreeData =
-    new vscode.EventEmitter<SearchTreeItem | undefined | null | void>();
-  readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-
-  private _treeView?: vscode.TreeView<SearchTreeItem>;
+  private _view?: vscode.WebviewView;
+  private _configWatcher?: vscode.Disposable;
   private readonly _searchService = new SearchService();
 
-  // Search option state — persisted in memory between searches
-  private _matchCase = false;
-  private _matchWord = false;
-  private _useRegex = false;
   private _categories: string[] = ['CLS', 'RTN', 'INC'];
   private _includeSystem = false;
   private _includeGenerated = false;
-  private _lastQuery = '';
 
-  private _results: ISearchResult[] = [];
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
-  // ------- VS Code TreeDataProvider ---------------------------------------
-
-  setTreeView(view: vscode.TreeView<SearchTreeItem>): void {
-    this._treeView = view;
-  }
-
-  getTreeItem(element: SearchTreeItem): vscode.TreeItem {
-    return element;
-  }
-
-  getChildren(element?: SearchTreeItem): SearchTreeItem[] {
-    if (!element) {
-      return this._results.map(r => new FileResultItem(r));
-    }
-    if (element instanceof FileResultItem) {
-      return (element.result.matches ?? []).map(
-        m => new MatchResultItem(m, element.result.name, element.result.category),
-      );
-    }
-    return [];
-  }
-
-  // ------- Commands -------------------------------------------------------
-
-  /**
-   * Open a VS Code InputBox with inline Aa / ab| / .* toggle buttons.
-   * Active toggles are coloured with `inputOption.activeForeground`.
-   * On accept, runs the streaming search and populates the tree.
-   */
-  async promptSearch(): Promise<void> {
-    const box = vscode.window.createInputBox();
-    box.placeholder = 'Search on IRIS…';
-    box.value = this._lastQuery;
-    box.buttons = this._makeToggleButtons();
-
-    let cleaned = false;
-    const cleanup = () => {
-      if (cleaned) { return; }
-      cleaned = true;
-      sub.dispose();
-      box.dispose();
+  resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken,
+  ): void {
+    this._view = webviewView;
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this._extensionUri, 'media')],
     };
+    webviewView.webview.html = this._buildHtml();
 
-    const sub = vscode.Disposable.from(
-      box.onDidTriggerButton((btn) => {
-        const idx = Array.from(box.buttons).indexOf(btn);
-        if (idx === 0) { this._matchCase = !this._matchCase; }
-        else if (idx === 1) { this._matchWord = !this._matchWord; }
-        else if (idx === 2) { this._useRegex = !this._useRegex; }
-        box.buttons = this._makeToggleButtons();
-      }),
-      box.onDidAccept(async () => {
-        const query = box.value.trim();
-        cleanup();
-        if (query) {
-          this._lastQuery = query;
-          await this._runSearch(query);
-        }
-      }),
-      box.onDidHide(cleanup),
-    );
+    webviewView.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
+      switch (msg.type) {
+        case 'search':
+          await this._handleSearch(msg.query, msg.matchCase, msg.matchWord, msg.useRegex);
+          break;
+        case 'openFile':
+          await this._searchService.openDocument(
+            msg.name, msg.category, msg.member, msg.line, msg.attrline, msg.attr, msg.text,
+          );
+          break;
+        case 'showFilters':
+          await this._handleShowFilters(msg.categories, msg.includeSystem, msg.includeGenerated);
+          break;
+      }
+    });
 
-    box.show();
+    this._checkConnectionStatus();
+    this._configWatcher?.dispose();
+    this._configWatcher = vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration('objectscript') || e.affectsConfiguration('intersystems.servers')) {
+        this._checkConnectionStatus();
+      }
+    });
   }
 
-  /** Open the multi-select QuickPick for file-type / option filters. */
-  async showFilters(): Promise<void> {
+  /** Called from the toolbar "Filters…" command. */
+  showFilters(): void {
+    this._post({ type: 'requestFilters' });
+  }
+
+  // ---------------------------------------------------------------------------
+
+  private async _checkConnectionStatus(): Promise<void> {
+    const conn = await getConnection();
+    this._post({ type: 'connStatus', ok: !!conn });
+  }
+
+  private async _handleSearch(
+    query: string,
+    matchCase: boolean,
+    matchWord: boolean,
+    useRegex: boolean,
+  ): Promise<void> {
+    this._post({ type: 'loading', loading: true });
+    try {
+      const conn = await getConnection();
+      if (!conn) {
+        throw new Error(
+          'No active ObjectScript connection found.\n\n' +
+          'Add a server in "intersystems.servers" and set "objectscript.conn" in your workspace settings.',
+        );
+      }
+      await this._searchService.runSearch(
+        query,
+        this._categories,
+        this._includeSystem,
+        this._includeGenerated,
+        useRegex,
+        matchCase,
+        matchWord,
+        (results, serverInfo, totalFiles, totalMatches) => {
+          this._post({ type: 'appendResults', results, serverInfo, totalFiles, totalMatches });
+        },
+      );
+    } catch (err) {
+      this._post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      this._post({ type: 'loading', loading: false });
+    }
+  }
+
+  private async _handleShowFilters(
+    categories: string[],
+    includeSystem: boolean,
+    includeGenerated: boolean,
+  ): Promise<void> {
+    this._categories = categories;
+    this._includeSystem = includeSystem;
+    this._includeGenerated = includeGenerated;
+
     const items: vscode.QuickPickItem[] = [
-      { label: '$(symbol-class) Classes',   description: 'CLS', picked: this._categories.includes('CLS'), alwaysShow: true },
-      { label: '$(symbol-misc) Routines',   description: 'RTN', picked: this._categories.includes('RTN'), alwaysShow: true },
-      { label: '$(symbol-file) Includes',   description: 'INC', picked: this._categories.includes('INC'), alwaysShow: true },
-      { label: '$(globe) Web files',        description: 'CSP', picked: this._categories.includes('CSP'), alwaysShow: true },
-      { label: '$(settings) Include System',   description: 'sys', picked: this._includeSystem,    alwaysShow: true },
-      { label: '$(gear) Include Generated',    description: 'gen', picked: this._includeGenerated, alwaysShow: true },
+      { label: '$(symbol-class) Classes',    description: 'CLS', picked: categories.includes('CLS'), alwaysShow: true },
+      { label: '$(symbol-misc) Routines',    description: 'RTN', picked: categories.includes('RTN'), alwaysShow: true },
+      { label: '$(symbol-file) Includes',    description: 'INC', picked: categories.includes('INC'), alwaysShow: true },
+      { label: '$(globe) Web files',         description: 'CSP', picked: categories.includes('CSP'), alwaysShow: true },
+      { label: '$(settings) Include System', description: 'sys', picked: includeSystem,    alwaysShow: true },
+      { label: '$(gear) Include Generated',  description: 'gen', picked: includeGenerated, alwaysShow: true },
     ];
 
     const result = await vscode.window.showQuickPick(items, {
@@ -168,102 +131,64 @@ export class SearchViewProvider implements vscode.TreeDataProvider<SearchTreeIte
       this._categories       = (['CLS', 'RTN', 'INC', 'CSP'] as const).filter(c => desc.has(c));
       this._includeSystem    = desc.has('sys');
       this._includeGenerated = desc.has('gen');
-    }
-  }
-
-  /** Clear all results and return to the welcome state. */
-  clear(): void {
-    this._results = [];
-    this._onDidChangeTreeData.fire();
-    if (this._treeView) {
-      this._treeView.description = undefined;
-      this._treeView.message = undefined;
-    }
-    vscode.commands.executeCommand('setContext', 'objectscriptSearch.hasResults', false);
-  }
-
-  // ------- Private --------------------------------------------------------
-
-  private async _runSearch(query: string): Promise<void> {
-    this._results = [];
-    this._onDidChangeTreeData.fire();
-    this._setView({ description: 'Searching\u2026', message: undefined });
-    vscode.commands.executeCommand('setContext', 'objectscriptSearch.hasResults', false);
-
-    const connection = await getConnection();
-    if (!connection) {
-      this._setView({
-        description: undefined,
-        message:
-          '\u26a0 No active ObjectScript connection. ' +
-          'Set "objectscript.conn" in your workspace settings and set active to true.',
+      this._post({
+        type: 'filtersUpdated',
+        categories: this._categories,
+        includeSystem: this._includeSystem,
+        includeGenerated: this._includeGenerated,
       });
-      return;
-    }
-
-    try {
-      let totalFiles = 0;
-      let totalMatches = 0;
-
-      await this._searchService.runSearch(
-        query,
-        this._categories,
-        this._includeSystem,
-        this._includeGenerated,
-        this._useRegex,
-        this._matchCase,
-        this._matchWord,
-        (results, _serverInfo, tf, tm) => {
-          this._results.push(...results);
-          totalFiles = tf;
-          totalMatches = tm;
-          this._onDidChangeTreeData.fire();
-          this._setView({
-            description: `${tm} ${tm === 1 ? 'match' : 'matches'} in ${tf} ${tf === 1 ? 'file' : 'files'}`,
-          });
-        },
-      );
-
-      if (this._results.length === 0) {
-        this._setView({ description: undefined, message: 'No documents matched your query.' });
-      } else {
-        const suffix = totalMatches >= 200 ? ' (limit reached)' : '';
-        this._setView({
-          message: undefined,
-          description:
-            `${totalMatches} ${totalMatches === 1 ? 'match' : 'matches'} in ` +
-            `${totalFiles} ${totalFiles === 1 ? 'file' : 'files'}${suffix}`,
-        });
-        vscode.commands.executeCommand('setContext', 'objectscriptSearch.hasResults', true);
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this._setView({ description: undefined, message });
     }
   }
 
-  private _setView(opts: { description?: string; message?: string }): void {
-    if (!this._treeView) { return; }
-    if ('description' in opts) { this._treeView.description = opts.description; }
-    if ('message' in opts) { this._treeView.message = opts.message; }
+  private _post(message: Record<string, unknown>): void {
+    this._view?.webview.postMessage(message);
   }
 
-  /** Create the three toggle buttons for the InputBox, colouring active ones. */
-  private _makeToggleButtons(): vscode.QuickInputButton[] {
-    const active = new vscode.ThemeColor('inputOption.activeForeground');
-    return [
-      {
-        iconPath: new vscode.ThemeIcon('case-sensitive', this._matchCase ? active : undefined),
-        tooltip: `Match Case \u2014 ${this._matchCase ? 'ON' : 'off'}`,
-      },
-      {
-        iconPath: new vscode.ThemeIcon('whole-word', this._matchWord ? active : undefined),
-        tooltip: `Match Whole Word \u2014 ${this._matchWord ? 'ON' : 'off'}`,
-      },
-      {
-        iconPath: new vscode.ThemeIcon('regex', this._useRegex ? active : undefined),
-        tooltip: `Use Regular Expression \u2014 ${this._useRegex ? 'ON' : 'off'}`,
-      },
-    ];
+  // ---------------------------------------------------------------------------
+
+  private _buildHtml(): string {
+    const webview = this._view!.webview;
+    const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', MEDIA_CSS));
+    const jsUri  = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', MEDIA_JS));
+    const csp = [
+      `default-src 'none'`,
+      `style-src ${webview.cspSource}`,
+      `script-src ${webview.cspSource}`,
+    ].join('; ');
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
+  <link rel="stylesheet" href="${cssUri}">
+</head>
+<body>
+  <div id="warn"></div>
+  <div class="sw">
+    <div class="ib">
+      <input id="q" type="text" placeholder="Search on IRIS\u2026" autocomplete="off" spellcheck="false"/>
+      <div class="tg">
+        <button class="t" id="bc" title="Match Case (Alt+C)">Aa</button>
+        <button class="t" id="bw" title="Match Whole Word (Alt+W)">ab|</button>
+        <button class="t" id="br" title="Use Regular Expression (Alt+R)">.*</button>
+      </div>
+    </div>
+  </div>
+  <div class="fr">
+    <span id="fsum"></span>
+    <button class="fb" id="bf">Filters\u2026</button>
+  </div>
+  <div id="status"></div>
+  <hr/>
+  <div id="results"></div>
+  <script src="${jsUri}"></script>
+</body>
+</html>`;
   }
 }
+
+type WebviewMessage =
+  | { type: 'search'; query: string; matchCase: boolean; matchWord: boolean; useRegex: boolean }
+  | { type: 'openFile'; name: string; category: string; member?: string; line?: number; attrline?: number; attr?: string; text?: string }
+  | { type: 'showFilters'; categories: string[]; includeSystem: boolean; includeGenerated: boolean };
