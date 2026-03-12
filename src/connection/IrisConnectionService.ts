@@ -99,3 +99,63 @@ export async function getConnection(): Promise<IConnection | undefined> {
 
   return undefined;
 }
+
+/**
+ * Returns every active IRIS connection in the workspace (one per active folder).
+ * Used by the search command to offer a namespace picker when multiple folders
+ * are connected to different servers / namespaces.
+ */
+export async function getAllConnections(): Promise<IConnection[]> {
+  const ext = vscode.extensions.getExtension<ObjectScriptExtAPI>(OBJECTSCRIPT_EXT_ID);
+  if (!ext) { return []; }
+  if (!ext.isActive) { await ext.activate(); }
+
+  const api = ext.exports;
+  const connections: IConnection[] = [];
+
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const conn = vscode.workspace
+      .getConfiguration('objectscript', folder)
+      .get<Record<string, unknown>>('conn');
+    if (conn?.active !== true) { continue; }
+
+    try {
+      const info = await api.asyncServerForUri(folder.uri);
+      if (!info.active || !info.host || !info.port) { continue; }
+
+      let password = info.password;
+
+      if (!password && info.serverName) {
+        const scopes = [info.serverName, info.username ?? ''];
+
+        let session = await vscode.authentication
+          .getSession(SM_AUTH_PROVIDER_ID, scopes, { silent: true })
+          .then(s => s, () => undefined);
+
+        if (!session) {
+          session = await vscode.authentication
+            .getSession(SM_AUTH_PROVIDER_ID, scopes, { createIfNone: true })
+            .then(s => s, () => undefined);
+        }
+
+        password = session?.accessToken;
+      }
+
+      connections.push({
+        serverName: info.serverName,
+        host: info.host,
+        port: info.port,
+        scheme: info.scheme || 'http',
+        pathPrefix: info.pathPrefix || '',
+        ns: (info.namespace || 'USER').toUpperCase(),
+        username: info.username || '_SYSTEM',
+        password: password ?? '',
+        wsFolderName: folder.name,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  return connections;
+}

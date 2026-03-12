@@ -1,3 +1,4 @@
+import type { CancellationToken } from 'vscode';
 import type { ISearchOptions, DocCategory } from '../types';
 import { AtelierAPI } from './api';
 import * as Atelier from './types';
@@ -21,6 +22,7 @@ import * as Atelier from './types';
 export async function* searchStream(
   api: AtelierAPI,
   options: ISearchOptions,
+  token?: CancellationToken,
 ): AsyncGenerator<Atelier.SearchResult[]> {
   const apiVersion = await api
     .serverInfo()
@@ -28,9 +30,9 @@ export async function* searchStream(
     .catch(() => 1);
 
   if (apiVersion >= 6) {
-    yield* _searchStreamAsync(api, options);
+    yield* _searchStreamAsync(api, options, token);
   } else {
-    yield* _searchStreamPerMask(api, options);
+    yield* _searchStreamPerMask(api, options, token);
   }
 }
 
@@ -43,6 +45,7 @@ export async function* searchStream(
 async function* _searchStreamAsync(
   api: AtelierAPI,
   options: ISearchOptions,
+  token?: CancellationToken,
 ): AsyncGenerator<Atelier.SearchResult[]> {
   const {
     query,
@@ -96,6 +99,7 @@ async function* _searchStreamAsync(
 
   // Poll until the job is complete, yielding each non-empty batch.
   for (;;) {
+    if (token?.isCancellationRequested) { return; }
     const pollResp = await api.pollAsync(id);
     const docs = (pollResp.result ?? []) as Atelier.SearchResult[];
     if (docs.length > 0) {
@@ -115,6 +119,7 @@ async function* _searchStreamAsync(
 async function* _searchStreamPerMask(
   api: AtelierAPI,
   options: ISearchOptions,
+  token?: CancellationToken,
 ): AsyncGenerator<Atelier.SearchResult[]> {
   const {
     query,
@@ -131,6 +136,7 @@ async function* _searchStreamPerMask(
   const masks = buildFileMasks(categories);
 
   for (const mask of masks) {
+    if (token?.isCancellationRequested) { return; }
     try {
       const resp = await api.actionSearch({
         query: pattern,

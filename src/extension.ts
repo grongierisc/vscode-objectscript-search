@@ -12,6 +12,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('objectscriptSearch.search',      () => provider.search()),
     vscode.commands.registerCommand('objectscriptSearch.showOptions',  () => provider.showOptions()),
     vscode.commands.registerCommand('objectscriptSearch.clearResults', () => provider.clearResults()),
+    vscode.commands.registerCommand('objectscriptSearch.copyResults',  () => provider.copyResults()),
     vscode.commands.registerCommand(
       'objectscriptSearch.openFile',
       (name: string, category: string, member?: string, line?: number, attrline?: number, attr?: string, text?: string) =>

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import type { ISearchResult, ISearchMatch, DocCategory } from '../types';
-import { getConnection, NO_CONNECTION_MSG } from '../connection/IrisConnectionService';
+import type { ISearchResult, ISearchMatch, DocCategory, IConnection } from '../types';
+import { getConnection, getAllConnections, NO_CONNECTION_MSG } from '../connection/IrisConnectionService';
 import { SearchService } from './SearchService';
 
 // ---------------------------------------------------------------------------
@@ -98,6 +98,13 @@ export class MatchItem extends vscode.TreeItem {
 
 type SearchNode = FileItem | MatchItem;
 
+/** Discriminated-union items used inside the search QuickPick (#4 + #7). */
+type SearchPickItem = vscode.QuickPickItem & (
+  | { _kind: 'run-search'; _query: string }
+  | { _kind: 'history';    _query: string }
+  | { _kind: 'result';     _name: string; _category: string }
+);
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
@@ -110,8 +117,11 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
 
   private _results: ISearchResult[] = [];
   private _configWatcher?: vscode.Disposable;
+  private _cts?: vscode.CancellationTokenSource;     // #1 cancel in-flight search
+  private _statusBar!: vscode.StatusBarItem;          // #3 status bar item
+  private _history: string[] = [];                    // #4 search history
 
-  // Search state (persisted across searches in this session)
+  // Search options (persisted to workspaceState — #2)
   private _categories: DocCategory[] = ['CLS', 'RTN', 'INC'];
   private _includeSystem    = false;
   private _includeGenerated = false;
@@ -124,6 +134,23 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     private readonly _context: vscode.ExtensionContext,
     private readonly _searchService: SearchService,
   ) {
+    // #2 Restore persisted options from workspace state
+    const ws = this._context.workspaceState;
+    this._categories       = ws.get('osc.categories',   ['CLS', 'RTN', 'INC']) as DocCategory[];
+    this._includeSystem    = ws.get('osc.incSystem',    false) as boolean;
+    this._includeGenerated = ws.get('osc.incGenerated', false) as boolean;
+    this._matchCase        = ws.get('osc.matchCase',    false) as boolean;
+    this._matchWord        = ws.get('osc.matchWord',    false) as boolean;
+    this._useRegex         = ws.get('osc.useRegex',     false) as boolean;
+    this._history          = ws.get('osc.history',      [])    as string[];
+
+    // #3 Status bar item
+    const sb = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    sb.command = 'objectscriptSearch.search';
+    sb.tooltip = 'ObjectScript Search — click to search';
+    this._statusBar = sb;
+    this._context.subscriptions.push(sb);
+
     this._checkConnectionStatus();
     const watcher = vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('objectscript') || e.affectsConfiguration('intersystems.servers')) {
@@ -137,6 +164,8 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
   dispose(): void {
     this._configWatcher?.dispose();
     this._onDidChangeTreeData.dispose();
+    this._cts?.cancel();
+    this._cts?.dispose();
   }
 
   // ── TreeDataProvider ──────────────────────────────────────────────────────
@@ -158,24 +187,56 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
   // ── Public commands ───────────────────────────────────────────────────────
 
   async search(): Promise<void> {
-    const conn = await getConnection();
-    if (!conn) {
+    // #5 Namespace picker — collect all active connections
+    const allConns = await getAllConnections();
+    if (allConns.length === 0) {
       vscode.window.showWarningMessage(NO_CONNECTION_MSG);
       return;
     }
 
-    const query = await vscode.window.showInputBox({
-      title: 'Search on IRIS',
-      prompt: `${conn.serverName ?? conn.host} › ${conn.ns}`,
-      placeHolder: 'Enter search term…',
-      value: this._lastQuery,
-    });
-    if (!query?.trim()) { return; }
-    this._lastQuery = query.trim();
+    let conn: IConnection;
+    if (allConns.length === 1) {
+      conn = allConns[0];
+    } else {
+      type ConnItem = vscode.QuickPickItem & { _conn: IConnection };
+      const pick = await vscode.window.showQuickPick<ConnItem>(
+        allConns.map(c => ({
+          label:       c.serverName ?? c.host,
+          description: c.ns,
+          detail:      c.wsFolderName,
+          _conn:       c,
+        })),
+        { title: 'Select IRIS Namespace', placeHolder: 'Pick a connection…' },
+      );
+      if (!pick) { return; }
+      conn = pick._conn;
+    }
 
-    // Clear previous results so the tree empties before new results arrive
+    // #4+#7 Rich picker: history + debounced live preview
+    const query = await this._showSearchPicker(conn);
+    if (!query) { return; }
+    this._lastQuery = query;
+
+    // Persist history (#4)
+    this._history = [query, ...this._history.filter(h => h !== query)].slice(0, 20);
+    void this._context.workspaceState.update('osc.history', this._history);
+
+    // #1 Cancel any in-flight search and issue a fresh token
+    this._cts?.cancel();
+    this._cts?.dispose();
+    this._cts = new vscode.CancellationTokenSource();
+    const token = this._cts.token;
+
     this._results = [];
     this._onDidChangeTreeData.fire();
+
+    // #3 Status bar: searching…
+    this._statusBar.text    = `$(loading~spin) "${query}"`;
+    this._statusBar.tooltip = `Searching IRIS for "${query}"…`;
+    this._statusBar.show();
+
+    let totalFiles   = 0;
+    let totalMatches = 0;
 
     await vscode.window.withProgress(
       { location: { viewId: SearchTreeProvider.viewType } },
@@ -183,31 +244,46 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
         try {
           await this._searchService.runSearch(
             conn,
-            this._lastQuery,
+            query,
             this._categories,
             this._includeSystem,
             this._includeGenerated,
             this._useRegex,
             this._matchCase,
             this._matchWord,
-            (batch) => {
-              this._results.push(...batch);
+            (_batch, _si, tf, tm) => {
+              if (token.isCancellationRequested) { return; }
+              this._results.push(..._batch);
+              totalFiles   = tf;
+              totalMatches = tm;
               this._onDidChangeTreeData.fire();
             },
+            token,
           );
         } catch (err) {
-          vscode.window.showErrorMessage(
-            `ObjectScript Search: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          if (!token.isCancellationRequested) {
+            vscode.window.showErrorMessage(
+              `ObjectScript Search: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
         }
       },
     );
+
+    // #3 Status bar: result summary
+    if (!token.isCancellationRequested) {
+      this._statusBar.text = totalFiles === 0
+        ? `$(search) "${query}" — no results`
+        : `$(search) "${query}" — ${totalMatches} match${totalMatches === 1 ? '' : 'es'} in ${totalFiles} file${totalFiles === 1 ? '' : 's'}`;
+      this._statusBar.tooltip = 'Click to run a new search';
+    }
   }
 
   clearResults(): void {
-    this._results = [];
+    this._results   = [];
     this._lastQuery = '';
     this._onDidChangeTreeData.fire();
+    this._statusBar.hide(); // #3
   }
 
   async showOptions(): Promise<void> {
@@ -240,9 +316,165 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     this._useRegex         = desc.has('rgx');
     this._includeSystem    = desc.has('sys');
     this._includeGenerated = desc.has('gen');
+
+    // #2 Persist updated options to workspace state
+    const ws = this._context.workspaceState;
+    void ws.update('osc.categories',   this._categories);
+    void ws.update('osc.matchCase',    this._matchCase);
+    void ws.update('osc.matchWord',    this._matchWord);
+    void ws.update('osc.useRegex',     this._useRegex);
+    void ws.update('osc.incSystem',    this._includeSystem);
+    void ws.update('osc.incGenerated', this._includeGenerated);
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
+
+  /** #6 Copy all current results to the clipboard as Markdown. */
+  async copyResults(): Promise<void> {
+    if (this._results.length === 0) {
+      vscode.window.showInformationMessage('ObjectScript Search: no results to copy.');
+      return;
+    }
+    const lines: string[] = [`## ObjectScript Search — \`${this._lastQuery}\``, ''];
+    for (const r of this._results) {
+      lines.push(`### ${r.name}`);
+      for (const m of r.matches) {
+        const loc = m.member
+          ? (m.line != null ? `${m.member}:${m.line}` : m.member)
+          : (m.line != null ? String(m.line) : '');
+        lines.push(`- \`${loc}\` ${m.text.trim()}`);
+      }
+      lines.push('');
+    }
+    await vscode.env.clipboard.writeText(lines.join('\n'));
+    vscode.window.showInformationMessage(
+      `Copied ${this._results.length} file${this._results.length === 1 ? '' : 's'} to clipboard.`,
+    );
+  }
+
+  /**
+   * #4+#7 Rich search QuickPick: shows history initially; as the user types,
+   * fires a debounced live preview of matching documents.
+   * Accepting a history/run-search item populates the tree.
+   * Accepting a live-result item opens the document directly.
+   */
+  private _showSearchPicker(conn: IConnection): Promise<string | undefined> {
+    return new Promise<string | undefined>(resolve => {
+      let settled = false;
+      const done = (value: string | undefined): void => {
+        if (settled) { return; }
+        settled = true;
+        resolve(value);
+      };
+
+      const qp = vscode.window.createQuickPick<SearchPickItem>();
+      qp.title              = `Search on IRIS — ${conn.serverName ?? conn.host} › ${conn.ns}`;
+      qp.placeholder        = 'Type to preview · ↵ to populate tree · pick result to open file';
+      qp.value              = this._lastQuery;
+      qp.matchOnDescription = false;
+      qp.matchOnDetail      = false;
+
+      const historyItems = (): SearchPickItem[] =>
+        this._history.map(h => ({
+          label:       `$(history) ${h}`,
+          description: 'history',
+          alwaysShow:  true,
+          _kind:       'history' as const,
+          _query:      h,
+        }));
+
+      qp.items = historyItems();
+
+      let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+      let liveCts: vscode.CancellationTokenSource | undefined;
+
+      const cancelLive = (): void => {
+        clearTimeout(debounceTimer);
+        liveCts?.cancel();
+        liveCts?.dispose();
+        liveCts = undefined;
+      };
+
+      qp.onDidChangeValue(value => {
+        cancelLive();
+        const q = value.trim();
+        if (!q) {
+          qp.items = historyItems();
+          qp.busy  = false;
+          return;
+        }
+
+        const runItem: SearchPickItem = {
+          label:       `$(search) Search for "${q}"`,
+          description: 'populate tree',
+          alwaysShow:  true,
+          _kind:       'run-search',
+          _query:      q,
+        };
+        qp.items = [runItem, ...historyItems()];
+
+        debounceTimer = setTimeout(async () => {
+          liveCts = new vscode.CancellationTokenSource();
+          const tok = liveCts.token;
+          qp.busy = true;
+          const liveItems: SearchPickItem[] = [];
+          try {
+            await this._searchService.runSearch(
+              conn, q,
+              this._categories, this._includeSystem, this._includeGenerated,
+              this._useRegex, this._matchCase, this._matchWord,
+              (batch) => {
+                if (tok.isCancellationRequested) { return; }
+                for (const r of batch) {
+                  const n = r.matches.length;
+                  liveItems.push({
+                    label:       `$(file) ${r.name}`,
+                    description: `${n} match${n === 1 ? '' : 'es'}`,
+                    detail:      r.matches[0]?.text.trim(),
+                    alwaysShow:  true,
+                    _kind:       'result',
+                    _name:       r.name,
+                    _category:   r.category,
+                  });
+                }
+                if (!tok.isCancellationRequested) {
+                  qp.items = [runItem, ...liveItems, ...historyItems()];
+                }
+              },
+              tok,
+            );
+          } catch { /* live-search errors are silent */ }
+          if (!tok.isCancellationRequested) { qp.busy = false; }
+        }, 300);
+      });
+
+      qp.onDidAccept(() => {
+        const [active] = qp.activeItems;
+        cancelLive();
+        qp.hide();
+        if (!active) {
+          done(qp.value.trim() || undefined);
+          return;
+        }
+        if (active._kind === 'run-search' || active._kind === 'history') {
+          done(active._query);
+          return;
+        }
+        if (active._kind === 'result') {
+          void this._searchService.openDocument(active._name, active._category);
+          done(undefined);
+        }
+      });
+
+      qp.onDidHide(() => {
+        cancelLive();
+        qp.dispose();
+        done(undefined);
+      });
+
+      qp.show();
+    });
+  }
 
   private async _checkConnectionStatus(): Promise<void> {
     const conn = await getConnection();

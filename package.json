@@ -68,6 +68,12 @@
         "title": "Clear Results",
         "icon": "$(clear-all)",
         "category": "ObjectScript"
+      },
+      {
+        "command": "objectscriptSearch.copyResults",
+        "title": "Copy Results",
+        "icon": "$(copy)",
+        "category": "ObjectScript"
       }
     ],
     "menus": {
@@ -86,6 +92,11 @@
           "command": "objectscriptSearch.clearResults",
           "when": "view == ObjectScriptSearch",
           "group": "navigation@3"
+        },
+        {
+          "command": "objectscriptSearch.copyResults",
+          "when": "view == ObjectScriptSearch",
+          "group": "navigation@4"
         }
       ]
     },

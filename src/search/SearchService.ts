@@ -32,6 +32,7 @@ export class SearchService {
       totalFiles: number,
       totalMatches: number,
     ) => void,
+    token?: vscode.CancellationToken,
   ): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('objectscriptSearch');
     const maxResults = cfg.get<number>('maxResults', 100);
@@ -52,7 +53,8 @@ export class SearchService {
     let totalFiles = 0;
     let totalMatches = 0;
 
-    for await (const batch of searchStream(api, opts)) {
+    for await (const batch of searchStream(api, opts, token)) {
+      if (token?.isCancellationRequested) { break; }
       const results: ISearchResult[] = batch.map((doc) => ({
         name: doc.doc,
         category: categoryFromDocName(doc.doc),
@@ -64,7 +66,7 @@ export class SearchService {
     }
 
     // Signal completion when no documents matched the query.
-    if (totalFiles === 0) {
+    if (totalFiles === 0 && !token?.isCancellationRequested) {
       onBatch([], serverInfo, 0, 0);
     }
   }
