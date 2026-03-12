@@ -1,5 +1,5 @@
 import * as assert from 'assert';
-import { buildObjectScriptUri } from '../../SearchViewProvider';
+import { buildObjectScriptUri } from '../../SearchService';
 
 // ---------------------------------------------------------------------------
 // Suite: buildObjectScriptUri

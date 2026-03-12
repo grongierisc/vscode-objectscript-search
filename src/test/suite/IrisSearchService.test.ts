@@ -5,6 +5,7 @@ import {
   AtelierAPI,
   searchStream,
   buildFileMasks,
+  buildSearchPattern,
   categoryFromDocName,
   _setTransport,
   Atelier,
@@ -221,6 +222,28 @@ suite('AtelierAPI > helpers', () => {
   test('categoryFromDocName: .inc -> INC', () => { assert.strictEqual(categoryFromDocName('My.inc'), 'INC'); });
   test('categoryFromDocName: .csp -> CSP', () => { assert.strictEqual(categoryFromDocName('/csp/user/page.csp'), 'CSP'); });
   test('categoryFromDocName: unknown -> OTH', () => { assert.strictEqual(categoryFromDocName('File.obj'), 'OTH'); });
+});
+
+// ---------------------------------------------------------------------------
+// Suite: buildSearchPattern
+// ---------------------------------------------------------------------------
+
+suite('AtelierAPI > buildSearchPattern', () => {
+  test('non-regex: returns query unchanged', () => {
+    assert.strictEqual(buildSearchPattern('findme', false, false), 'findme');
+  });
+
+  test('non-regex case-sensitive: still returns query unchanged', () => {
+    assert.strictEqual(buildSearchPattern('FindMe', false, true), 'FindMe');
+  });
+
+  test('regex case-insensitive: wraps with .*.* and adds (?i) prefix', () => {
+    assert.strictEqual(buildSearchPattern('foo.*bar', true, false), '(?i).*foo.*bar.*');
+  });
+
+  test('regex case-sensitive: wraps with .*.* without (?i)', () => {
+    assert.strictEqual(buildSearchPattern('foo.*bar', true, true), '.*foo.*bar.*');
+  });
 });
 
 // ---------------------------------------------------------------------------

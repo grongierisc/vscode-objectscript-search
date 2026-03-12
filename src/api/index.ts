@@ -294,19 +294,32 @@ async function* _searchStreamAsync(
   api: AtelierAPI,
   options: ISearchOptions,
 ): AsyncGenerator<Atelier.SearchResult[]> {
-  const { query, categories, maxResults, includeSystem, includeGenerated = false, regex = false } =
-    options;
+  const {
+    query,
+    categories,
+    maxResults,
+    includeSystem,
+    includeGenerated = false,
+    regex = false,
+    caseSensitive = false,
+    wordMatch = false,
+  } = options;
 
   const masks = buildFileMasks(categories);
   if (masks.length === 0) return;
 
+  // Mirror vscode-objectscript TextSearchProvider: in regex mode the Atelier
+  // server matches the full line, so wrap the pattern with .*.* and add (?i)
+  // for case-insensitive searches.
+  const pattern = buildSearchPattern(query, regex, caseSensitive);
+
   const request: Atelier.AsyncSearchRequest = {
     request: 'search',
     console: false,
-    query,
+    query: pattern,
     regex,
-    case: false,
-    word: false,
+    case: caseSensitive,
+    word: wordMatch,
     wild: false,
     documents: masks.join(','),
     system: includeSystem,
@@ -353,20 +366,31 @@ async function* _searchStreamPerMask(
   api: AtelierAPI,
   options: ISearchOptions,
 ): AsyncGenerator<Atelier.SearchResult[]> {
-  const { query, categories, maxResults, includeSystem, includeGenerated = false, regex = false } =
-    options;
+  const {
+    query,
+    categories,
+    maxResults,
+    includeSystem,
+    includeGenerated = false,
+    regex = false,
+    caseSensitive = false,
+    wordMatch = false,
+  } = options;
 
+  const pattern = buildSearchPattern(query, regex, caseSensitive);
   const masks = buildFileMasks(categories);
 
   for (const mask of masks) {
     try {
       const resp = await api.actionSearch({
-        query,
+        query: pattern,
         files: mask,
         sys: includeSystem,
         gen: includeGenerated,
         max: maxResults,
         regex,
+        case: caseSensitive,
+        word: wordMatch,
       });
       const docs = (resp.result ?? []) as Atelier.SearchResult[];
       if (docs.length > 0) {
@@ -381,6 +405,23 @@ async function* _searchStreamPerMask(
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+/**
+ * Build the query pattern sent to the Atelier API.
+ *
+ * This mirrors the pattern transformation in vscode-objectscript's
+ * `TextSearchProvider.provideTextSearchResults()`:
+ * > Modify the query pattern if we're doing a regex search.
+ * > Needed because the server matches the full line against the regex
+ * > and ignores the case parameter when in regex mode.
+ *
+ * - Non-regex: pattern is passed through unchanged.
+ * - Regex + case-insensitive: prefixed with `(?i)` and wrapped with `.*….*`.
+ * - Regex + case-sensitive: wrapped with `.*….*` only.
+ */
+export function buildSearchPattern(query: string, regex: boolean, caseSensitive: boolean): string {
+  return regex ? `${!caseSensitive ? '(?i)' : ''}.*${query}.*` : query;
+}
 
 /** Build Atelier file masks from the user-selected category filter. */
 export function buildFileMasks(categories: DocCategory[]): string[] {

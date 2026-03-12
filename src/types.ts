@@ -20,7 +20,12 @@ export interface ISearchOptions {
   maxResults: number;
   includeSystem: boolean;
   includeGenerated?: boolean;
+  /** Use regex matching. When true the pattern is wrapped with `.*….*` and prefixed with `(?i)` for case-insensitive mode (Atelier API behaviour). */
   regex?: boolean;
+  /** Case-sensitive match. Only meaningful when `regex` is false; ignored in regex mode (use `(?i)` instead). */
+  caseSensitive?: boolean;
+  /** Whole-word match. Passed as the `word` parameter to the Atelier API. */
+  wordMatch?: boolean;
 }
 
 /** Alias for Atelier.SearchMatch — the raw match shape returned by the Atelier API. */
