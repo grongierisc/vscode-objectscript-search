@@ -16,6 +16,7 @@ export interface ISearchOptions {
   categories: DocCategory[];
   maxResults: number;
   includeSystem: boolean;
+  includeGenerated?: boolean;
   regex?: boolean;
 }
 

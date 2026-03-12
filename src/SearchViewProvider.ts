@@ -59,7 +59,7 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       switch (msg.type) {
         case 'search':
-          await this._handleSearch(msg.query, msg.categories);
+          await this._handleSearch(msg.query, msg.categories, msg.includeSystem ?? false, msg.includeGenerated ?? false);
           break;
         case 'openFile':
           await this._openFile(msg.name, msg.category);
@@ -73,6 +73,8 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   private async _handleSearch(
     query: string,
     categories: string[],
+    includeSystem: boolean,
+    includeGenerated: boolean,
   ): Promise<void> {
     if (!this._view) {
       return;
@@ -94,13 +96,13 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
       const cfg = vscode.workspace.getConfiguration('objectscriptSearch');
       const maxResults = cfg.get<number>('maxResults', 100);
-      const includeSystem = cfg.get<boolean>('includeSystem', false);
 
       const opts = {
         query,
         categories: categories as import('./types').DocCategory[],
         maxResults,
         includeSystem,
+        includeGenerated,
       };
 
       const results = await search(connection, opts);
@@ -418,8 +420,13 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
         <button class="pill active" data-value="INC">Includes</button>
         <button class="pill" data-value="CSP">Web</button>
       </div>
-    </div>
-  </div>
+    </div>    <div class="opt-row">
+      <span class="opt-label">Options:</span>
+      <div class="pills" id="sysGroup">
+        <button class="pill" data-value="sys" id="sysBtn">System</button>
+        <button class="pill" data-value="gen" id="genBtn">Generated</button>
+      </div>
+    </div>  </div>
 
   <hr>
 
@@ -434,6 +441,8 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   const vscode = acquireVsCodeApi();
 
   let categories = ['CLS', 'RTN', 'INC'];
+  let includeSystem = false;
+  let includeGenerated = false;
   let lastQuery = '';
 
   const queryEl   = document.getElementById('query');
@@ -464,13 +473,18 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
       .map(p => p.dataset.value);
   });
 
+  setupPillGroup('sysGroup', true, () => {
+    includeSystem = document.getElementById('sysBtn').classList.contains('active');
+    includeGenerated = document.getElementById('genBtn').classList.contains('active');
+  });
+
   // ── Search ───────────────────────────────────────────────────────────────
 
   function doSearch() {
     const q = queryEl.value.trim();
     if (!q) return;
     lastQuery = q;
-    vscode.postMessage({ type: 'search', query: q, categories });
+    vscode.postMessage({ type: 'search', query: q, categories, includeSystem, includeGenerated });
   }
 
   searchBtn.addEventListener('click', doSearch);
@@ -631,5 +645,5 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 // ---------------------------------------------------------------------------
 
 type WebviewMessage =
-  | { type: 'search'; query: string; categories: string[] }
+  | { type: 'search'; query: string; categories: string[]; includeSystem?: boolean; includeGenerated?: boolean }
   | { type: 'openFile'; name: string; category: string };

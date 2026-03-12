@@ -152,6 +152,18 @@ suite('IrisSearchService > search', () => {
     assert.ok(calls[0].capture.path.includes('sys=1'));
   });
 
+  test('passes gen=0 when includeGenerated is omitted', async () => {
+    const calls = installTransport({ result: [] });
+    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: false });
+    assert.ok(calls[0].capture.path.includes('gen=0'));
+  });
+
+  test('passes gen=1 when includeGenerated is true', async () => {
+    const calls = installTransport({ result: [] });
+    await search(BASE_CONN, { query: 'q', categories: [], maxResults: 10, includeSystem: false, includeGenerated: true });
+    assert.ok(calls[0].capture.path.includes('gen=1'));
+  });
+
   test('includes Basic auth header', async () => {
     const calls = installTransport({ result: [] });
     await search(BASE_CONN, { query: 'x', categories: [], maxResults: 10, includeSystem: false });

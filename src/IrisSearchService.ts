@@ -15,16 +15,17 @@ export async function search(
   connection: IConnection,
   options: ISearchOptions,
 ): Promise<ISearchResult[]> {
-  const { query, categories, maxResults, includeSystem, regex = false } = options;
+  const { query, categories, maxResults, includeSystem, includeGenerated = false, regex = false } = options;
 
   const masks = buildFileMasks(categories);
   if (masks.length === 0) return [];
 
   const sysParam = includeSystem ? '1' : '0';
+  const genParam = includeGenerated ? '1' : '0';
   const regexParam = regex ? '1' : '0';
   const path = buildPath(
     connection,
-    `/action/search?query=${encodeURIComponent(query)}&files=${encodeURIComponent(masks.join(','))}&regex=${regexParam}&sys=${sysParam}&max=${maxResults}`,
+    `/action/search?query=${encodeURIComponent(query)}&files=${encodeURIComponent(masks.join(','))}&regex=${regexParam}&sys=${sysParam}&gen=${genParam}&max=${maxResults}`,
     2,
   );
 
