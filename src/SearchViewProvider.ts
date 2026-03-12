@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import type { ISearchResult } from './types';
+import type { ISearchResult, ISearchMatch } from './types';
 import { getConnection } from './IrisConnectionService';
-import { search } from './IrisSearchService';
+import { searchStream } from './IrisSearchService';
+import { resolveMatchLine } from './matchResolver';
 
 /**
  * Build the `objectscript://` URI used by vscode-objectscript's
@@ -35,140 +36,11 @@ export function buildObjectScriptUri(
   });
 }
 
-/**
- * Convert a 1-based absolute line number to a VS Code Range suitable for use
- * as a `selection` in `showTextDocument`.
- * Returns `undefined` when `line` is absent, zero, or negative.
- */
-export function buildLineSelection(line: number | undefined): vscode.Range | undefined {
-  if (line === undefined || line <= 0) return undefined;
-  const pos = new vscode.Position(line - 1, 0);
-  return new vscode.Range(pos, pos);
-}
-
-/**
- * Resolve an Atelier API match to an absolute VS Code Position within an open
- * TextDocument (a `.cls` file).
- *
- * The `/action/search` endpoint returns `line` and `attrline` as 1-based
- * offsets counted from the line containing the member's opening `{`:
- *
- *   absolute_0based = brace_line_0based + offset
- *
- * When no offset is provided but a `member` name is, the position resolves to
- * the member's declaration line so the editor scrolls to that member.
- *
- * Returns `undefined` when the member cannot be found in the document.
- */
-export function resolveMatchPosition(
-  doc: vscode.TextDocument,
-  member: string | undefined,
-  line: number | undefined,
-  attrline: number | undefined,
-): vscode.Position | undefined {
-  if (!member) return undefined;
-
-  const info = _findMemberBraceInfo(doc, member);
-  if (!info) return undefined;
-
-  const offset = line ?? attrline;
-  if (offset !== undefined && offset > 0) {
-    return new vscode.Position(info.braceLine + offset, 0);
-  }
-  return new vscode.Position(info.declLine, 0);
-}
-
-/**
- * Scan a TextDocument for a class member matching `member` and return the
- * 0-based indices of its declaration line and body-opening `{` line.
- *
- * Two strategies are tried:
- *  1. Primary:  `^KEYWORD  memberName` — handles most members (Method, XData…)
- *  2. Fallback: `^memberName  <anything>` — handles cases where the API returns
- *     the keyword itself as the member name (e.g. Storage → "Storage Default").
- */
-function _findMemberBraceInfo(
-  doc: vscode.TextDocument,
-  member: string,
-): { declLine: number; braceLine: number } | undefined {
-  const name = member.split('(')[0];
-  const esc = _escapeRe(name);
-  const primaryRe = new RegExp(
-    `^(ClassMethod|Method|Query|XData|Storage|Property|Index|Parameter|Trigger|Relationship|ForeignKey|Projection|ClassVariable)\\s+${esc}(\\s|\\(|$)`,
-    'i',
-  );
-  // Fallback: member name IS the keyword (e.g. member="Storage" → "Storage Default").
-  const fallbackRe = new RegExp(`^${esc}\\s+\\S`, 'i');
-
-  let fallbackDecl = -1;
-  for (let i = 0; i < doc.lineCount; i++) {
-    const text = doc.lineAt(i).text;
-    if (primaryRe.test(text)) {
-      return _braceFrom(doc, i);
-    }
-    if (fallbackDecl === -1 && fallbackRe.test(text)) {
-      fallbackDecl = i;
-    }
-  }
-  return fallbackDecl !== -1 ? _braceFrom(doc, fallbackDecl) : undefined;
-}
-
-function _braceFrom(
-  doc: vscode.TextDocument,
-  declLine: number,
-): { declLine: number; braceLine: number } {
-  for (let j = declLine; j < Math.min(doc.lineCount, declLine + 40); j++) {
-    if (doc.lineAt(j).text.trim() === '{') {
-      return { declLine, braceLine: j };
-    }
-  }
-  return { declLine, braceLine: declLine };
-}
-
-function _escapeRe(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Try to find a member's declaration line by querying VS Code's document symbol
- * provider — which vscode-objectscript registers for `objectscript://` documents.
- * Returns `undefined` if the symbol provider isn't available or the member isn't
- * found, so callers can fall back to the text-scan approach.
- */
-async function _findMemberBraceInfoFromSymbols(
-  uri: vscode.Uri,
-  doc: vscode.TextDocument,
-  member: string,
-): Promise<{ declLine: number; braceLine: number } | undefined> {
-  try {
-    const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
-      'vscode.executeDocumentSymbolProvider',
-      uri,
-    );
-    if (!symbols?.length) return undefined;
-    const targetName = member.split('(')[0].toLowerCase();
-    const flat = _flattenSymbols(symbols);
-    const sym = flat.find(s => s.name.split('(')[0].toLowerCase() === targetName);
-    if (!sym) return undefined;
-    return _braceFrom(doc, sym.range.start.line);
-  } catch {
-    return undefined;
-  }
-}
-
-function _flattenSymbols(syms: vscode.DocumentSymbol[]): vscode.DocumentSymbol[] {
-  const result: vscode.DocumentSymbol[] = [];
-  for (const s of syms) {
-    result.push(s);
-    if (s.children?.length) result.push(..._flattenSymbols(s.children));
-  }
-  return result;
-}
-
 export class SearchViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = 'ObjectScriptSearch';
 
   private _view?: vscode.WebviewView;
+  private _configWatcher?: vscode.Disposable;
 
   constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -192,13 +64,37 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
           await this._handleSearch(msg.query, msg.categories, msg.includeSystem ?? false, msg.includeGenerated ?? false);
           break;
         case 'openFile':
-          await this._openFile(msg.name, msg.category, msg.member, msg.line, msg.attrline);
+          await this._openFile(msg.name, msg.category, msg.member, msg.line, msg.attrline, msg.attr, msg.text);
           break;
+      }
+    });
+
+    // Check connection status immediately and re-check whenever settings change.
+    this._checkConnectionStatus();
+    this._configWatcher?.dispose();
+    this._configWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('objectscript') || e.affectsConfiguration('intersystems.servers')) {
+        this._checkConnectionStatus();
       }
     });
   }
 
   // ---------------------------------------------------------------------------
+
+  private async _checkConnectionStatus(): Promise<void> {
+    const connection = await getConnection();
+    if (!connection) {
+      this._post({
+        type: 'connStatus',
+        ok: false,
+        message:
+          'No active ObjectScript connection.\n' +
+          'Set "objectscript.conn" in your workspace settings and set active to true.',
+      });
+    } else {
+      this._post({ type: 'connStatus', ok: true, message: '' });
+    }
+  }
 
   private async _handleSearch(
     query: string,
@@ -235,9 +131,15 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
         includeGenerated,
       };
 
-      const results = await search(connection, opts);
+      const serverInfo = connection.serverName ?? connection.host;
+      let totalFiles = 0;
+      let totalMatches = 0;
 
-      this._post({ type: 'results', results, serverInfo: connection.serverName ?? connection.host });
+      for await (const batch of searchStream(connection, opts)) {
+        totalFiles += batch.length;
+        totalMatches += batch.reduce((n, r) => n + (r.matches?.length ?? 0), 0);
+        this._post({ type: 'appendResults', results: batch, serverInfo, totalFiles, totalMatches });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this._post({ type: 'error', message });
@@ -252,6 +154,8 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     member?: string,
     line?: number,
     attrline?: number,
+    attr?: string,
+    matchText?: string,
   ): Promise<void> {
     const connection = await getConnection();
     if (!connection) {
@@ -279,31 +183,16 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
       const textDoc = await vscode.workspace.openTextDocument(uri);
 
-      // Resolve the target position in the file.
-      // For .cls files with a member context: line/attrline are offsets from the
-      // member's opening { line.
-      // Primary: use vscode-objectscript's document symbol provider for exact positions.
-      // Fallback: regex text scan (for when the symbol provider isn't available yet).
-      let pos: vscode.Position | undefined;
-      if (member && name.toLowerCase().endsWith('.cls')) {
-        const info =
-          await _findMemberBraceInfoFromSymbols(uri, textDoc, member)
-          ?? _findMemberBraceInfo(textDoc, member);
-        if (info) {
-          const offset = line ?? attrline;
-          pos = offset !== undefined && offset > 0
-            ? new vscode.Position(info.braceLine + offset, 0)
-            : new vscode.Position(info.declLine, 0);
-        }
-      }
-      if (!pos) {
-        const abs = line ?? attrline;
-        if (abs !== undefined && abs > 0) {
-          pos = new vscode.Position(abs - 1, 0);
-        }
-      }
+      // Resolve the target position using the ported vscode-objectscript algorithm.
+      const content = textDoc.getText().split(/\r?\n/);
+      const multilineMethodArgs = vscode.workspace
+        .getConfiguration('objectscript')
+        .get<boolean>('multilineMethodArgs', false);
+      const match: ISearchMatch = { text: matchText ?? '', member, line, attrline, attr };
+      const resolvedLine = resolveMatchLine(content, match, name, multilineMethodArgs);
 
-      if (pos) {
+      if (resolvedLine !== null) {
+        const pos = new vscode.Position(resolvedLine, 0);
         await vscode.window.showTextDocument(textDoc, { selection: new vscode.Range(pos, pos) });
       }
     } catch {
@@ -529,6 +418,19 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     }
 
     /* ── Error / empty ──────────────────────────────────────────────────── */
+    .conn-warning {
+      display: none;
+      padding: 6px 8px;
+      background: var(--vscode-inputValidation-warningBackground);
+      border: 1px solid var(--vscode-inputValidation-warningBorder);
+      color: var(--vscode-inputValidation-warningForeground, var(--vscode-foreground));
+      border-radius: 2px;
+      font-size: 11px;
+      white-space: pre-wrap;
+      margin-bottom: 6px;
+    }
+    .conn-warning.visible { display: block; }
+
     .error {
       padding: 8px;
       background: var(--vscode-inputValidation-errorBackground);
@@ -567,6 +469,8 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
   </style>
 </head>
 <body>
+
+  <div class="conn-warning" id="connWarning"></div>
 
   <div class="row">
     <div class="input-wrap">
@@ -661,14 +565,28 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
       case 'loading':
         setLoading(msg.loading);
         break;
-      case 'results':
-        showResults(msg.results, msg.serverInfo);
+      case 'appendResults':
+        appendResults(msg.results, msg.serverInfo, msg.totalFiles, msg.totalMatches);
         break;
       case 'error':
         showError(msg.message);
         break;
+      case 'connStatus':
+        setConnWarning(msg.ok, msg.message);
+        break;
     }
   });
+
+  function setConnWarning(ok, message) {
+    const el = document.getElementById('connWarning');
+    if (ok) {
+      el.classList.remove('visible');
+      el.textContent = '';
+    } else {
+      el.textContent = '⚠ ' + message;
+      el.classList.add('visible');
+    }
+  }
 
   function setLoading(loading) {
     searchBtn.disabled = loading;
@@ -676,6 +594,12 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
     if (loading) {
       statusTxt.textContent = 'Searching…';
       resultsEl.innerHTML = '';
+    } else if (!loading && !resultsEl.children.length && lastQuery) {
+      statusTxt.textContent = 'No results.';
+      const d = document.createElement('div');
+      d.className = 'empty';
+      d.textContent = 'No documents matched your query.';
+      resultsEl.appendChild(d);
     }
   }
 
@@ -699,6 +623,30 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
       + (serverInfo ? ' · ' + serverInfo : '');
 
     for (const r of results) {
+      resultsEl.appendChild(buildResultGroup(r));
+    }
+  }
+
+  /** Append a batch of results from the streaming search, updating the running count. */
+  function appendResults(results, serverInfo, totalFiles, totalMatches) {
+    // Remove the "no results" placeholder if present
+    const empty = resultsEl.querySelector('.empty');
+    if (empty) empty.remove();
+
+    for (const r of results) {
+      resultsEl.appendChild(buildResultGroup(r));
+    }
+
+    const limit = totalMatches >= 200 ? ' (limit reached)' : '';
+    statusTxt.textContent =
+      totalMatches + (totalMatches === 1 ? ' match' : ' matches')
+      + ' in ' + totalFiles + (totalFiles === 1 ? ' file' : ' files')
+      + limit
+      + (serverInfo ? ' · ' + serverInfo : '');
+  }
+
+  /** Build the DOM subtree for a single file result group. */
+  function buildResultGroup(r) {
       const group = document.createElement('div');
       group.className = 'file-group';
 
@@ -750,15 +698,14 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
           li.appendChild(loc);
           li.appendChild(text);
           li.addEventListener('click', () =>
-            vscode.postMessage({ type: 'openFile', name: r.name, category: r.category, member: m.member, line: m.line, attrline: m.attrline }),
+            vscode.postMessage({ type: 'openFile', name: r.name, category: r.category, member: m.member, line: m.line, attrline: m.attrline, attr: m.attr, text: m.text }),
           );
           list.appendChild(li);
         }
         group.appendChild(list);
       }
 
-      resultsEl.appendChild(group);
-    }
+      return group;
   }
 
   function showError(message) {
@@ -810,4 +757,5 @@ export class SearchViewProvider implements vscode.WebviewViewProvider {
 
 type WebviewMessage =
   | { type: 'search'; query: string; categories: string[]; includeSystem?: boolean; includeGenerated?: boolean }
-  | { type: 'openFile'; name: string; category: string; member?: string; line?: number; attrline?: number };
+  | { type: 'openFile'; name: string; category: string; member?: string; line?: number; attrline?: number; attr?: string; text?: string }
+  | { type: 'appendResults'; results: ISearchResult[]; serverInfo: string; totalFiles: number; totalMatches: number };

@@ -4,19 +4,66 @@ import * as vscode from 'vscode';
 import { getConnection } from '../../IrisConnectionService';
 
 // ---------------------------------------------------------------------------
-// Helper: stub vscode.workspace.getConfiguration for 'objectscript'
+// Helpers
 // ---------------------------------------------------------------------------
 
-function stubObjectScriptConn(
+/** Build a fake asyncServerForUri result. */
+function makeServerInfo(overrides: Partial<{
+  serverName: string;
+  active: boolean;
+  scheme: string;
+  host: string;
+  port: number;
+  pathPrefix: string;
+  username: string;
+  password: string | undefined;
+  namespace: string;
+}> = {}) {
+  return {
+    serverName: undefined as string | undefined,
+    active: true,
+    scheme: 'http',
+    host: 'localhost',
+    port: 52773,
+    pathPrefix: '',
+    username: '_SYSTEM',
+    password: 'SYS' as string | undefined,
+    namespace: 'USER',
+    ...overrides,
+  };
+}
+
+/** Stub workspace folders + objectscript.conn.active check + vscode-objectscript API. */
+function setupEnv(
   sandbox: sinon.SinonSandbox,
-  connValue: unknown,
+  opts: {
+    connActive?: boolean;
+    serverInfo?: ReturnType<typeof makeServerInfo> | Error;
+  } = {},
 ): void {
+  const connActive = opts.connActive ?? true;
+  const fakeFolder: vscode.WorkspaceFolder = {
+    index: 0,
+    name: 'myFolder',
+    uri: vscode.Uri.file('/fake'),
+  };
+
+  sandbox.stub(vscode.workspace, 'workspaceFolders').get(() => [fakeFolder]);
   sandbox.stub(vscode.workspace, 'getConfiguration').callsFake(() => ({
-    get: (key: string) => (key === 'conn' ? connValue : undefined),
+    get: (key: string) => (key === 'conn' ? { active: connActive } : undefined),
     has: () => false,
     inspect: () => undefined,
     update: async () => undefined,
   } as unknown as vscode.WorkspaceConfiguration));
+
+  const asyncServerForUri = opts.serverInfo instanceof Error
+    ? sinon.stub().rejects(opts.serverInfo)
+    : sinon.stub().resolves(opts.serverInfo ?? makeServerInfo());
+
+  sandbox.stub(vscode.extensions, 'getExtension').returns({
+    isActive: true,
+    exports: { asyncServerForUri },
+  } as never);
 }
 
 // ---------------------------------------------------------------------------
@@ -26,225 +73,297 @@ function stubObjectScriptConn(
 suite('IrisConnectionService > getConnection', () => {
   let sandbox: sinon.SinonSandbox;
 
-  setup(() => {
-    sandbox = sinon.createSandbox();
-  });
-
+  setup(() => { sandbox = sinon.createSandbox(); });
   teardown(() => sandbox.restore());
 
-  // ── inactive connection ────────────────────────────────────────────────────
+  // ── extension not installed ────────────────────────────────────────────────
 
-  test('returns undefined when conn.active is false and Server Manager absent', async () => {
-    stubObjectScriptConn(sandbox, { active: false, host: 'localhost', port: 52773 });
+  test('returns undefined when vscode-objectscript is not installed', async () => {
+    sandbox.stub(vscode.workspace, 'workspaceFolders').get(() => []);
     sandbox.stub(vscode.extensions, 'getExtension').returns(undefined);
 
-    const result = await getConnection();
-    assert.strictEqual(result, undefined);
+    assert.strictEqual(await getConnection(), undefined);
   });
 
-  test('returns undefined when conn is undefined and Server Manager absent', async () => {
-    stubObjectScriptConn(sandbox, undefined);
-    sandbox.stub(vscode.extensions, 'getExtension').returns(undefined);
+  // ── no workspace folders ──────────────────────────────────────────────────
 
-    const result = await getConnection();
-    assert.strictEqual(result, undefined);
+  test('returns undefined when there are no workspace folders', async () => {
+    sandbox.stub(vscode.workspace, 'workspaceFolders').get(() => []);
+    sandbox.stub(vscode.extensions, 'getExtension').returns({
+      isActive: true,
+      exports: { asyncServerForUri: sinon.stub() },
+    } as never);
+
+    assert.strictEqual(await getConnection(), undefined);
   });
 
-  // ── inline connection (host / port) ────────────────────────────────────────
+  // ── conn.active false ──────────────────────────────────────────────────────
 
-  test('returns connection from inline host/port', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, host: 'myserver', port: 52773, ns: 'MYNS', username: 'Admin', password: 'pass', https: false,
+  test('returns undefined when conn.active is false', async () => {
+    setupEnv(sandbox, { connActive: false });
+    assert.strictEqual(await getConnection(), undefined);
+  });
+
+  // ── basic connection ──────────────────────────────────────────────────────
+
+  test('returns IConnection from asyncServerForUri result', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({
+        host: 'irishost', port: 52773, namespace: 'PROD',
+        username: 'Admin', password: 'pass', scheme: 'http', pathPrefix: '',
+      }),
     });
 
     const result = await getConnection();
     assert.ok(result !== undefined);
-    assert.strictEqual(result!.host, 'myserver');
+    assert.strictEqual(result!.host, 'irishost');
     assert.strictEqual(result!.port, 52773);
-    assert.strictEqual(result!.namespace, 'MYNS');
+    assert.strictEqual(result!.namespace, 'PROD');
     assert.strictEqual(result!.username, 'Admin');
     assert.strictEqual(result!.password, 'pass');
     assert.strictEqual(result!.scheme, 'http');
+    assert.strictEqual(result!.pathPrefix, '');
   });
 
-  test('uses https scheme when https is true', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, host: 'secure.example.com', port: 443, ns: 'USER', username: 'Admin', password: 'pass', https: true,
-    });
-
+  test('uses https scheme', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ scheme: 'https', host: 'secure.example.com', port: 443 }) });
     const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.scheme, 'https');
-  });
-
-  test('defaults namespace to USER when ns is absent', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, host: 'localhost', port: 52773, username: '_SYSTEM', password: '',
-    });
-
-    const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.namespace, 'USER');
+    assert.strictEqual(result?.scheme, 'https');
   });
 
   test('uppercases namespace', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, host: 'localhost', port: 52773, ns: 'myns', username: '_SYSTEM', password: '',
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ namespace: 'myns' }) });
+    const result = await getConnection();
+    assert.strictEqual(result?.namespace, 'MYNS');
+  });
+
+  test('defaults namespace to USER when empty', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ namespace: '' }) });
+    const result = await getConnection();
+    assert.strictEqual(result?.namespace, 'USER');
+  });
+
+  test('defaults username to _SYSTEM when absent in result', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ username: '' }) });
+    const result = await getConnection();
+    assert.strictEqual(result?.username, '_SYSTEM');
+  });
+
+  // ── inactive connection in result ─────────────────────────────────────────
+
+  test('returns undefined when asyncServerForUri reports active:false', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ active: false }) });
+    assert.strictEqual(await getConnection(), undefined);
+  });
+
+  test('returns undefined when asyncServerForUri reports empty host', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ host: '' }) });
+    assert.strictEqual(await getConnection(), undefined);
+  });
+
+  // ── named server: password via auth provider ──────────────────────────────
+
+  test('uses auth provider session when password is undefined (named server)', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({
+        serverName: 'my-iris', username: 'SuperUser', password: undefined,
+      }),
     });
-
-    const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.namespace, 'MYNS');
-  });
-
-  test('defaults username to _SYSTEM when absent', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, host: 'localhost', port: 52773, ns: 'USER',
+    sandbox.stub(vscode.authentication, 'getSession').resolves({
+      id: '1', accessToken: 'keychainSecret',
+      account: { id: 'SuperUser', label: 'SuperUser' }, scopes: [],
     });
-
-    const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.username, '_SYSTEM');
-  });
-
-  // ── active but no host or server → falls back to Server Manager ───────────
-
-  test('returns undefined when active but no host/server and Server Manager absent', async () => {
-    stubObjectScriptConn(sandbox, { active: true });
-    sandbox.stub(vscode.extensions, 'getExtension').returns(undefined);
-
-    const result = await getConnection();
-    assert.strictEqual(result, undefined);
-  });
-
-  // ── named server via Server Manager API ────────────────────────────────────
-
-  test('resolves named server via Server Manager API', async () => {
-    stubObjectScriptConn(sandbox, { active: true, server: 'my-iris', ns: 'PROD' });
-
-    const fakeSpec = {
-      name: 'my-iris',
-      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '/iris' },
-      username: 'SuperUser',
-      password: 'secret',
-    };
-    const fakeApi = {
-      getServerSpec: async (_name: string) => fakeSpec,
-      getServerNames: () => [],
-    };
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: fakeApi,
-    } as never);
 
     const result = await getConnection();
     assert.ok(result !== undefined);
     assert.strictEqual(result!.serverName, 'my-iris');
-    assert.strictEqual(result!.host, 'irishost');
-    assert.strictEqual(result!.port, 52773);
-    assert.strictEqual(result!.namespace, 'PROD');
-    assert.strictEqual(result!.pathPrefix, '/iris');
     assert.strictEqual(result!.username, 'SuperUser');
+    assert.strictEqual(result!.password, 'keychainSecret');
   });
 
-  test('returns undefined when named server spec not found in Server Manager', async () => {
-    stubObjectScriptConn(sandbox, { active: true, server: 'missing-server', ns: 'USER' });
-
-    const fakeApi = {
-      getServerSpec: async (_name: string) => undefined,
-      getServerNames: () => [],
-    };
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: fakeApi,
-    } as never);
+  test('returns empty password when auth provider also returns nothing', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({ serverName: 'my-iris', password: undefined }),
+    });
+    sandbox.stub(vscode.authentication, 'getSession').resolves(null as never);
 
     const result = await getConnection();
-    assert.strictEqual(result, undefined);
+    assert.ok(result !== undefined);
+    assert.strictEqual(result!.password, '');
   });
 
-  test('activates Server Manager extension if not yet active', async () => {
-    stubObjectScriptConn(sandbox, { active: true, server: 'my-iris', ns: 'USER' });
+  test('does not call auth provider when password is already set', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ password: 'alreadySet' }) });
+    const authSpy = sandbox.stub(vscode.authentication, 'getSession');
 
-    const fakeSpec = {
-      name: 'my-iris',
-      webServer: { host: 'h', port: 52773, scheme: 'http', pathPrefix: '' },
-      username: 'u', password: 'p',
-    };
+    await getConnection();
+    assert.ok(!authSpy.called, 'getSession should not be called when password is already present');
+  });
+
+  // ── extension activation ──────────────────────────────────────────────────
+
+  test('activates vscode-objectscript extension if not yet active', async () => {
+    const asyncServerForUri = sinon.stub().resolves(makeServerInfo());
     const activated: string[] = [];
     const fakeExt = {
       isActive: false,
       activate: async () => { activated.push('activated'); fakeExt.isActive = true; },
-      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
+      exports: { asyncServerForUri },
     };
+
+    const fakeFolder: vscode.WorkspaceFolder = { index: 0, name: 'ws', uri: vscode.Uri.file('/f') };
+    sandbox.stub(vscode.workspace, 'workspaceFolders').get(() => [fakeFolder]);
+    sandbox.stub(vscode.workspace, 'getConfiguration').returns({
+      get: (key: string) => key === 'conn' ? { active: true } : undefined,
+      has: () => false, inspect: () => undefined, update: async () => undefined,
+    } as unknown as vscode.WorkspaceConfiguration);
     sandbox.stub(vscode.extensions, 'getExtension').returns(fakeExt as never);
 
     await getConnection();
     assert.ok(activated.includes('activated'), 'activate() should have been called');
   });
 
-  // ── credential overrides when using named server (fix for 401) ────────────
+  // ── error handling ────────────────────────────────────────────────────────
 
-  test('overrides Server Manager credentials with username and password from conn config', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, server: 'my-iris', ns: 'IRISAPP',
-      username: 'SuperUser', password: 'SYS',
-    });
-
-    const fakeSpec = {
-      name: 'my-iris',
-      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '' },
-      username: 'OldUser', password: 'OldPass',
-    };
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
-    } as never);
-
-    const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.username, 'SuperUser', 'conn username should override spec username');
-    assert.strictEqual(result!.password, 'SYS', 'conn password should override spec password');
-    assert.strictEqual(result!.namespace, 'IRISAPP');
+  test('returns undefined when asyncServerForUri throws', async () => {
+    setupEnv(sandbox, { serverInfo: new Error('connection refused') });
+    assert.strictEqual(await getConnection(), undefined);
   });
 
-  test('falls back to Server Manager credentials when conn omits username and password', async () => {
-    stubObjectScriptConn(sandbox, { active: true, server: 'my-iris', ns: 'USER' });
+  // ── port validation ───────────────────────────────────────────────────────
 
-    const fakeSpec = {
-      name: 'my-iris',
-      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '' },
-      username: 'SpecUser', password: 'SpecPass',
-    };
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
-    } as never);
-
-    const result = await getConnection();
-    assert.ok(result !== undefined);
-    assert.strictEqual(result!.username, 'SpecUser', 'should use spec username when conn has none');
-    assert.strictEqual(result!.password, 'SpecPass', 'should use spec password when conn has none');
+  test('returns undefined when asyncServerForUri reports port 0', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ port: 0 }) });
+    assert.strictEqual(await getConnection(), undefined);
   });
 
-  test('allows overriding password with an empty string', async () => {
-    stubObjectScriptConn(sandbox, {
-      active: true, server: 'my-iris', ns: 'USER',
-      username: 'Admin', password: '',
-    });
+  // ── pathPrefix preserved ──────────────────────────────────────────────────
 
-    const fakeSpec = {
-      name: 'my-iris',
-      webServer: { host: 'irishost', port: 52773, scheme: 'http', pathPrefix: '' },
-      username: 'Admin', password: 'ShouldBeIgnored',
-    };
-    sandbox.stub(vscode.extensions, 'getExtension').returns({
-      isActive: true,
-      exports: { getServerSpec: async () => fakeSpec, getServerNames: () => [] },
-    } as never);
+  test('preserves pathPrefix from asyncServerForUri result', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ pathPrefix: '/api/atelier' }) });
+    const result = await getConnection();
+    assert.strictEqual(result?.pathPrefix, '/api/atelier');
+  });
+
+  // ── serverName preserved ──────────────────────────────────────────────────
+
+  test('preserves serverName in returned IConnection', async () => {
+    setupEnv(sandbox, { serverInfo: makeServerInfo({ serverName: 'prod-iris', password: 'p' }) });
+    const result = await getConnection();
+    assert.strictEqual(result?.serverName, 'prod-iris');
+  });
+
+  // ── auth provider throws ──────────────────────────────────────────────────
+
+  test('returns empty password when auth provider call throws', async () => {
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({ serverName: 'my-iris', password: undefined }),
+    });
+    sandbox.stub(vscode.authentication, 'getSession').rejects(new Error('provider unavailable'));
 
     const result = await getConnection();
     assert.ok(result !== undefined);
-    assert.strictEqual(result!.password, '', 'explicit empty-string password in conn should be used');
+    assert.strictEqual(result!.password, '');
+  });
+
+  // ── asyncServerForUri receives correct URI ────────────────────────────────
+
+  test('calls asyncServerForUri with the workspace folder URI', async () => {
+    const fakeUri = vscode.Uri.file('/my-workspace');
+    const fakeFolder: vscode.WorkspaceFolder = { index: 0, name: 'ws', uri: fakeUri };
+    const asyncServerForUri = sinon.stub().resolves(makeServerInfo());
+
+    sandbox.stub(vscode.workspace, 'workspaceFolders').get(() => [fakeFolder]);
+    sandbox.stub(vscode.workspace, 'getConfiguration').returns({
+      get: (key: string) => key === 'conn' ? { active: true } : undefined,
+      has: () => false, inspect: () => undefined, update: async () => undefined,
+    } as unknown as vscode.WorkspaceConfiguration);
+    sandbox.stub(vscode.extensions, 'getExtension').returns({
+      isActive: true,
+      exports: { asyncServerForUri },
+    } as never);
+
+    await getConnection();
+    assert.ok(asyncServerForUri.calledOnceWith(fakeUri), 'asyncServerForUri must receive the folder URI');
+  });
+
+  // ── multiple workspace folders ────────────────────────────────────────────
+
+  /** Build a fake WorkspaceFolder. */
+  function makeFolder(name: string, path: string): vscode.WorkspaceFolder {
+    return { index: 0, name, uri: vscode.Uri.file(path) };
+  }
+
+  /** Stub extensions.getExtension to expose a per-URI asyncServerForUri map. */
+  function stubMultiFolderEnv(
+    sandbox: sinon.SinonSandbox,
+    folders: vscode.WorkspaceFolder[],
+    connActiveByName: Record<string, boolean>,
+    serverInfoByName: Record<string, ReturnType<typeof makeServerInfo> | Error>,
+  ): void {
+    sandbox.stub(vscode.workspace, 'workspaceFolders').get(() => folders);
+    sandbox.stub(vscode.workspace, 'getConfiguration').callsFake((_section, scope) => {
+      const folder = scope as vscode.WorkspaceFolder;
+      const active = connActiveByName[folder.name] ?? false;
+      return {
+        get: (key: string) => key === 'conn' ? { active } : undefined,
+        has: () => false, inspect: () => undefined, update: async () => undefined,
+      } as unknown as vscode.WorkspaceConfiguration;
+    });
+    const asyncServerForUri = sinon.stub().callsFake((uri: vscode.Uri) => {
+      const folder = folders.find(f => f.uri.toString() === uri.toString());
+      const info = folder ? serverInfoByName[folder.name] : undefined;
+      if (info instanceof Error) return Promise.reject(info);
+      return Promise.resolve(info ?? makeServerInfo());
+    });
+    sandbox.stub(vscode.extensions, 'getExtension').returns({
+      isActive: true,
+      exports: { asyncServerForUri },
+    } as never);
+  }
+
+  test('skips inactive folder and returns connection from second active folder', async () => {
+    const folderA = makeFolder('folderA', '/a');
+    const folderB = makeFolder('folderB', '/b');
+    stubMultiFolderEnv(
+      sandbox,
+      [folderA, folderB],
+      { folderA: false, folderB: true },
+      { folderB: makeServerInfo({ host: 'hostB', port: 1972 }) },
+    );
+
+    const result = await getConnection();
+    assert.strictEqual(result?.host, 'hostB');
+    assert.strictEqual(result?.port, 1972);
+  });
+
+  test('returns undefined when all folders have conn.active:false', async () => {
+    const folderA = makeFolder('folderA', '/a');
+    const folderB = makeFolder('folderB', '/b');
+    stubMultiFolderEnv(
+      sandbox,
+      [folderA, folderB],
+      { folderA: false, folderB: false },
+      {},
+    );
+
+    assert.strictEqual(await getConnection(), undefined);
+  });
+
+  test('falls back to next folder when first active folder throws', async () => {
+    const folderA = makeFolder('folderA', '/a');
+    const folderB = makeFolder('folderB', '/b');
+    stubMultiFolderEnv(
+      sandbox,
+      [folderA, folderB],
+      { folderA: true, folderB: true },
+      {
+        folderA: new Error('connect error'),
+        folderB: makeServerInfo({ host: 'fallbackHost', port: 52773 }),
+      },
+    );
+
+    const result = await getConnection();
+    assert.strictEqual(result?.host, 'fallbackHost');
   });
 });
