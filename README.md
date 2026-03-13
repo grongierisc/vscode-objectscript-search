@@ -1,6 +1,6 @@
 # ObjectScript Search
 
-A VS Code extension that adds a **Search** panel to the InterSystems activity bar, enabling server-side search across classes, routines, and include files on an IRIS instance — directly from the same sidebar as the **Explorer** and **Servers** views.
+A VS Code extension that adds a **Search** panel to the InterSystems activity bar, enabling full-text server-side search across classes, routines, includes, and web files on an IRIS instance — directly from the same sidebar as the **Explorer** and **Servers** views.
 
 ---
 
@@ -8,18 +8,27 @@ A VS Code extension that adds a **Search** panel to the InterSystems activity ba
 
 | Feature | Details |
 |---|---|
-| **By Name** | Filter documents by name using wildcard patterns (e.g. `*Utils*`) |
-| **By Content** | Search inside class method implementations and routine names |
-| **Type filters** | Toggle Classes, Routines, Includes, and Web (CSP) independently |
-| **Click to open** | Click any result to open it via `isfs://` in the ObjectScript editor |
+| **Full-text search** | Search inside class definitions, routines, includes, and web files |
+| **Match options** | Toggle case-sensitive, whole-word, and regular-expression matching |
+| **Type filters** | Toggle Classes, Routines, Includes, and Web (CSP) files independently |
+| **Streaming results** | Results appear progressively as the server returns batches |
+| **Live preview** | The search picker shows matching file names as you type |
+| **Click to open** | Click any result to open it read-only in the ObjectScript editor |
+| **Cursor positioning** | Match items scroll the editor to the exact matched line |
+| **Match highlights** | Query text is highlighted in both file names and match lines |
+| **Search history** | Last 20 queries are saved per workspace |
+| **Copy results** | Export the full result list to the clipboard as Markdown |
+| **Status bar** | Shows match/file counts after each search |
 | **Native UI** | Follows VS Code's color theme automatically |
 
 ## Requirements
 
+Both extensions below are **required** and are automatically installed as dependencies.
+
 | Extension | Purpose |
 |---|---|
-| [`intersystems-community.servermanager`](https://marketplace.visualstudio.com/items?itemName=intersystems-community.servermanager) | Required — manages IRIS server connections |
-| [`intersystems-community.vscode-objectscript`](https://marketplace.visualstudio.com/items?itemName=intersystems-community.vscode-objectscript) | Recommended — needed to open search results |
+| [`intersystems-community.servermanager`](https://marketplace.visualstudio.com/items?itemName=intersystems-community.servermanager) | Manages IRIS server connections and keychain authentication |
+| [`intersystems-community.vscode-objectscript`](https://marketplace.visualstudio.com/items?itemName=intersystems-community.vscode-objectscript) | Provides the `objectscript://` document provider used to open results |
 
 ## Setup
 
@@ -66,28 +75,46 @@ Click the InterSystems icon in the Activity Bar and expand the **Search** sectio
 
 | Setting | Default | Description |
 |---|---|---|
-| `objectscriptSearch.maxResults` | `100` | Maximum results returned per search |
-| `objectscriptSearch.includeSystem` | `false` | Include `%`-prefixed system documents |
+| `objectscriptSearch.maxResults` | `100` | Maximum results returned per search (1–1000) |
+| `objectscriptSearch.includeSystem` | `false` | Include `%`-prefixed system documents by default |
 | `objectscriptSearch.allowSelfSignedCertificates` | `false` | Accept self-signed TLS certificates |
+
+## Search Options
+
+Click the **Options…** (filter) icon in the view title bar to configure per-workspace options. Settings are persisted to workspace state across sessions.
+
+| Option | Description |
+|---|---|
+| **Classes / Routines / Includes / Web files** | Toggle which document types to include |
+| **Match Case** | Case-sensitive matching |
+| **Whole Word** | Restrict matches to whole words |
+| **Regular Expression** | Treat the query as a regex pattern |
+| **Include System** | Include `%`-prefixed system documents |
+| **Include Generated** | Include compiler-generated documents |
 
 ## How It Works
 
-### By Name
-Calls `GET /api/atelier/v1/{namespace}/docnames?filter=*{query}*` against the IRIS Atelier REST API and filters results by the selected document types.
+The extension calls the InterSystems Atelier REST API directly against the active IRIS server:
 
-### By Content
-Runs parameterized SQL queries against the IRIS server:
-- **Classes** — searches `%Dictionary.MethodDefinition.Implementation`
-- **Routines / Includes** — searches `%Library.RoutineIndex` by name
+- **IRIS API v6+** — queues an asynchronous search job via `POST /api/atelier/v6/{ns}/work` and polls until complete, yielding result batches progressively.
+- **Older servers** — falls back to `GET /api/atelier/v2/{ns}/action/search`, issuing one request per selected file-type mask.
+
+In regex mode the server matches the full line, so the query is automatically wrapped to align with IRIS regex semantics.
 
 ## Opening Results
 
-Clicking a result opens the document using the `isfs://` URI scheme provided by **vscode-objectscript**. The server-side workspace folder must be open for this to work.
+Clicking a file item or match item opens the document **read-only** via the `objectscript://` URI scheme, using vscode-objectscript's built-in `DocumentContentProvider`. For match items, the editor scrolls to and positions the cursor at the matched line.
+
+> A workspace folder with an active `objectscript.conn` configuration must be open for results to be openable.
+
+## Multiple Namespaces
+
+When more than one workspace folder has an active ObjectScript connection, a namespace picker is shown before each search so you can target the correct server and namespace.
 
 ## Development
 
 ```bash
-git clone https://github.com/intersystems-community/vscode-objectscript-search
+git clone https://github.com/grongierisc/vscode-objectscript-search
 cd vscode-objectscript-search
 npm install
 npm run compile
