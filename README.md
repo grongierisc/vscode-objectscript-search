@@ -1,5 +1,7 @@
 # ObjectScript Search
 
+<img src="media/icon.png" alt="ObjectScript Search icon" width="96" align="right"/>
+
 A VS Code extension that adds a **Search** panel to the InterSystems activity bar, enabling full-text server-side search across classes, routines, includes, and web files on an IRIS instance — directly from the same sidebar as the **Explorer** and **Servers** views.
 
 ---
@@ -20,6 +22,34 @@ A VS Code extension that adds a **Search** panel to the InterSystems activity ba
 | **Copy results** | Export the full result list to the clipboard as Markdown |
 | **Status bar** | Shows match/file counts after each search |
 | **Native UI** | Follows VS Code's color theme automatically |
+
+## Screenshots
+
+**No active connection** — the panel guides you to configure `objectscript.conn`:
+
+![No active connection](misc/img/NoConnection.jpg)
+
+**Ready to search** — once connected, click to open the search picker:
+
+![Active connection](misc/img/Connectionctive.jpg)
+
+**Search picker with history** — previous queries are shown instantly; results stream in as you type:
+
+![Search picker with history](misc/img/SearchWithHistory.jpg)
+
+**Options panel** — toggle document types and match behaviour per workspace:
+
+![Search options](misc/img/Options.jpg)
+
+**Search results** — classes and routines listed with per-file match counts and highlighted snippets:
+
+![Search results](misc/img/ResultWithClassAndRoutine.jpg)
+
+**Click to go to line** — clicking a match item opens the document and jumps the cursor to the exact matched line:
+
+![Click to go to line](misc/img/ClickGoToLine.jpg)
+
+---
 
 ## Requirements
 
