@@ -1,0 +1,74 @@
+# Creates a GitHub Release when a vX.Y.Z tag is pushed.
+#
+# Steps:
+#   1. Verify the tag version matches package.json (prevents accidental mismatches).
+#   2. Build the .vsix package with @vscode/vsce.
+#   3. Publish a GitHub Release with the .vsix attached and auto-generated notes.
+#
+# Optionally, uncomment the "Publish to Marketplace" step after adding the
+# VSCE_PAT secret in repository Settings → Secrets and variables → Actions.
+#
+# Usage:
+#   git tag v1.2.3
+#   git push origin v1.2.3
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract version from tag
+        id: ver
+        # GITHUB_REF_NAME is e.g. "v1.2.3"; strip the leading "v".
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches package.json version
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG=${{ steps.ver.outputs.version }}
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json version ($PKG) does not match tag ($TAG)."
+            echo "Tip: make sure the version bump commit is included before tagging."
+            exit 1
+          fi
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Package extension
+        run: vsce package
+
+      # ── Optional: publish to VS Code Marketplace ──────────────────────────
+      # Uncomment after adding VSCE_PAT to repository secrets.
+      #
+      # - name: Publish to Marketplace
+      #   run: vsce publish --pat ${{ secrets.VSCE_PAT }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Release ${{ github.ref_name }}"
+          # Attach the packaged .vsix
+          files: "*.vsix"
+          # Auto-generate release notes from commit messages since last tag
+          generate_release_notes: true

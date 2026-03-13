@@ -1,0 +1,52 @@
+# Automatically bumps the patch version in package.json on every push to main.
+# The resulting commit uses [skip ci] so it does not trigger another bump.
+# A release is created separately by pushing a vX.Y.Z tag.
+
+name: Version Bump
+
+on:
+  push:
+    branches:
+      - main
+    # Do not re-trigger when this workflow itself commits package.json.
+    paths-ignore:
+      - '.github/**'
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    # Skip commits already made by this workflow to prevent loops.
+    if: "!contains(github.event.head_commit.message, 'chore: bump version')"
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Use a PAT if branch protection requires signed commits; otherwise
+          # the default GITHUB_TOKEN is sufficient.
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Configure git bot identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump patch version (no git tag)
+        run: npm version patch --no-git-tag-version
+
+      - name: Read new version
+        id: ver
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        run: |
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to ${{ steps.ver.outputs.version }} [skip ci]"
+          git push
