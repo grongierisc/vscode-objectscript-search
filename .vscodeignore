@@ -3,6 +3,7 @@
 src/**
 out/**
 node_modules/**
+misc/**
 .gitignore
 .gitattributes
 webpack.config.js
