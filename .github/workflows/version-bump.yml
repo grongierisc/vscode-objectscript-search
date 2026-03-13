@@ -1,6 +1,12 @@
-# Automatically bumps the patch version in package.json on every push to main.
+# Automatically bumps package.json to the next beta prerelease on every push to main.
+# e.g.  0.1.0 → 0.1.1-beta.0 → 0.1.1-beta.1 → …
+#
+# Full releases (clean semver, no prerelease suffix) are created manually:
+#   1. Run `npm version patch|minor|major --no-git-tag-version` locally.
+#   2. Commit the package.json change.
+#   3. Push a vX.Y.Z tag — the Release workflow picks it up from there.
+#
 # The resulting commit uses [skip ci] so it does not trigger another bump.
-# A release is created separately by pushing a vX.Y.Z tag.
 
 name: Version Bump
 
@@ -38,8 +44,9 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump patch version (no git tag)
-        run: npm version patch --no-git-tag-version
+      - name: Bump to next beta prerelease (no git tag)
+        # Increments the prerelease counter, e.g. 0.1.0 → 0.1.1-beta.0 → 0.1.1-beta.1
+        run: npm version prerelease --preid=beta --no-git-tag-version
 
       - name: Read new version
         id: ver
