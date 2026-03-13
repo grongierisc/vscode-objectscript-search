@@ -87,11 +87,23 @@ Define your IRIS server in **User Settings** (or `intersystems.servers` in `.vsc
 ```jsonc
 // .vscode/settings.json
 {
+{
   "objectscript.conn": {
     "active": true,
     "server": "my-iris",
+    // Or
+    "host":"localhost",
+    "port":52773,
+    "username": "_IRIS_USERNAME_",
+    "password": "_IRIS_PASSWORD_",
+    // Or
+    "docker-compose": {
+        "service": "iris",
+        "internalPort": 52773
+     },
     "ns": "USER"
   }
+}
 }
 ```
 
