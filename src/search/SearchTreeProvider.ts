@@ -142,11 +142,11 @@ export class MatchItem extends vscode.TreeItem {
 
 type SearchNode = FileItem | MatchItem;
 
-/** Discriminated-union items used inside the search QuickPick (#4 + #7). */
+/** Discriminated-union items used inside the search QuickPick. */
 type SearchPickItem = vscode.QuickPickItem & (
-  | { _kind: 'run-search'; _query: string }
-  | { _kind: 'history';    _query: string }
-  | { _kind: 'result';     _name: string; _category: string }
+  | { _kind: 'history'; _query: string }
+  | { _kind: 'toggle';  _opt: 'cas' | 'wrd' | 'rgx' }
+  | { _kind: 'separator' }
 );
 
 // ---------------------------------------------------------------------------
@@ -322,7 +322,6 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
       conn = pick._conn;
     }
 
-    // #4+#7 Rich picker: history + debounced live preview
     const query = await this._showSearchPicker(conn);
     if (!query) { return; }
     this._lastQuery = query;
@@ -464,10 +463,8 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
   }
 
   /**
-   * #4+#7 Rich search QuickPick: shows history initially; as the user types,
-   * fires a debounced live preview of matching documents.
-   * Accepting a history/run-search item populates the tree.
-   * Accepting a live-result item opens the document directly.
+   * Search QuickPick: shows history initially; as the user types the query
+   * is updated. Accepting a history item or the run-search item populates the tree.
    */
   private _showSearchPicker(conn: IConnection): Promise<string | undefined> {
     return new Promise<string | undefined>(resolve => {
@@ -480,105 +477,71 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
 
       const qp = vscode.window.createQuickPick<SearchPickItem>();
       qp.title              = `Search on IRIS — ${conn.serverName ?? conn.host} › ${conn.ns}`;
-      qp.placeholder        = 'Type to preview · ↵ to populate tree · pick result to open file';
+      qp.placeholder        = 'Type a query · ↵ to search · pick history to reuse';
       qp.value              = this._lastQuery;
       qp.matchOnDescription = false;
       qp.matchOnDetail      = false;
+
+      // ── Helpers ──────────────────────────────────────────────────────────
+
+      const optionSep = (): SearchPickItem =>
+        ({ kind: vscode.QuickPickItemKind.Separator, label: 'Options', _kind: 'separator' } as SearchPickItem);
+
+      const optionItems = (): SearchPickItem[] => [
+        {
+          label:      `${this._matchCase ? '$(check)' : '$(circle-large-outline)'} Match Case`,
+          alwaysShow: true, _kind: 'toggle', _opt: 'cas',
+        } as SearchPickItem,
+        {
+          label:      `${this._matchWord ? '$(check)' : '$(circle-large-outline)'} Whole Word`,
+          alwaysShow: true, _kind: 'toggle', _opt: 'wrd',
+        } as SearchPickItem,
+        {
+          label:      `${this._useRegex ? '$(check)' : '$(circle-large-outline)'} Regular Expression`,
+          alwaysShow: true, _kind: 'toggle', _opt: 'rgx',
+        } as SearchPickItem,
+      ];
 
       const historyItems = (): SearchPickItem[] =>
         this._history.map(h => ({
           label:       `$(history) ${h}`,
           description: 'history',
-          alwaysShow:  true,
+          alwaysShow:  false,
           _kind:       'history' as const,
           _query:      h,
         }));
 
-      qp.items = historyItems();
+      const buildItems = (): SearchPickItem[] => [
+        ...historyItems(),
+        optionSep(),
+        ...optionItems(),
+      ];
 
-      let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-      let liveCts: vscode.CancellationTokenSource | undefined;
+      qp.items = buildItems();
 
-      const cancelLive = (): void => {
-        clearTimeout(debounceTimer);
-        liveCts?.cancel();
-        liveCts?.dispose();
-        liveCts = undefined;
-      };
-
-      qp.onDidChangeValue(value => {
-        cancelLive();
-        const q = value.trim();
-        if (!q) {
-          qp.items = historyItems();
-          qp.busy  = false;
-          return;
-        }
-
-        const runItem: SearchPickItem = {
-          label:       `$(search) Search for "${q}"`,
-          description: 'populate tree',
-          alwaysShow:  true,
-          _kind:       'run-search',
-          _query:      q,
-        };
-        qp.items = [runItem, ...historyItems()];
-
-        debounceTimer = setTimeout(async () => {
-          liveCts = new vscode.CancellationTokenSource();
-          const tok = liveCts.token;
-          qp.busy = true;
-          const liveItems: SearchPickItem[] = [];
-          try {
-            await this._searchService.runSearch(
-              conn, q,
-              this._categories, this._includeSystem, this._includeGenerated,
-              this._useRegex, this._matchCase, this._matchWord,
-              (batch) => {
-                if (tok.isCancellationRequested) { return; }
-                for (const r of batch) {
-                  const n = r.matches.length;
-                  liveItems.push({
-                    label:       `$(file) ${r.name}`,
-                    description: `${n} match${n === 1 ? '' : 'es'}`,
-                    detail:      r.matches[0]?.text.trim(),
-                    alwaysShow:  true,
-                    _kind:       'result',
-                    _name:       r.name,
-                    _category:   r.category,
-                  });
-                }
-                if (!tok.isCancellationRequested) {
-                  qp.items = [runItem, ...liveItems, ...historyItems()];
-                }
-              },
-              tok,
-            );
-          } catch { /* live-search errors are silent */ }
-          if (!tok.isCancellationRequested) { qp.busy = false; }
-        }, 300);
+      qp.onDidChangeValue(() => {
+        qp.items = buildItems();
       });
 
       qp.onDidAccept(() => {
         const [active] = qp.activeItems;
-        cancelLive();
+        // Toggle option — keep picker open, refresh option items
+        if (active?._kind === 'toggle') {
+          if      (active._opt === 'cas') { this._matchCase = !this._matchCase; void this._context.workspaceState.update('osc.matchCase', this._matchCase); }
+          else if (active._opt === 'wrd') { this._matchWord = !this._matchWord; void this._context.workspaceState.update('osc.matchWord', this._matchWord); }
+          else if (active._opt === 'rgx') { this._useRegex  = !this._useRegex;  void this._context.workspaceState.update('osc.useRegex',  this._useRegex);  }
+          qp.items = buildItems();
+          return;
+        }
         qp.hide();
-        if (!active) {
-          done(qp.value.trim() || undefined);
-          return;
-        }
-        if (active._kind === 'run-search' || active._kind === 'history') {
+        if (active?._kind === 'history') {
           done(active._query);
-          return;
-        }
-        if (active._kind === 'result') {
-          void this._searchService.openDocument(active._name, active._category);
-          done(undefined);
+        } else {
+          done(qp.value.trim() || undefined);
         }
       });
 
       qp.onDidHide(() => {
-        cancelLive();
         qp.dispose();
         done(undefined);
       });
