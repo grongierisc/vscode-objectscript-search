@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import type { ISearchResult, ISearchMatch, DocCategory, IConnection } from '../types';
 import { getConnection, getAllConnections, NO_CONNECTION_MSG } from '../connection/IrisConnectionService';
 import { SearchService } from './SearchService';
+import { buildObjectScriptUri } from '../utils/uri';
+import { resolveMatchLine } from '../utils/matchResolver';
 
 // ---------------------------------------------------------------------------
 // Tree items
@@ -25,6 +27,16 @@ const CATEGORY_COLOR: Record<string, string> = {
   CSP: 'charts.blue',
   RTN: 'symbolIcon.miscForeground',
   PKG: 'symbolIcon.namespaceForeground',
+};
+
+const CATEGORY_LABEL: Record<string, string> = {
+  CLS: 'Class',
+  MAC: 'MAC Routine',
+  INT: 'INT Routine',
+  INC: 'Include',
+  CSP: 'Web (CSP) File',
+  RTN: 'Routine',
+  PKG: 'Package',
 };
 
 /**
@@ -60,7 +72,37 @@ export class FileItem extends vscode.TreeItem {
       ? new vscode.ThemeColor(CATEGORY_COLOR[result.category])
       : undefined;
     this.iconPath = new vscode.ThemeIcon(CATEGORY_ICON[result.category] ?? 'file', color);
-    this.tooltip = result.name;
+
+    const md = new vscode.MarkdownString('', true);
+    md.isTrusted = true;
+    md.appendMarkdown(`**${result.name}**\n\n`);
+    const typeLabel = CATEGORY_LABEL[result.category] ?? result.category;
+    md.appendMarkdown(`$(file-code) Type: **${typeLabel}**  ·  $(search) **${n}** match${n === 1 ? '' : 'es'}`);
+
+    // Show the first few match locations as a quick overview
+    const preview = result.matches.slice(0, 5);
+    if (preview.length > 0) {
+      md.appendMarkdown(`\n\n---\n\n`);
+      for (const m of preview) {
+        const parts: string[] = [];
+        if (m.member) {
+          parts.push(m.line != null ? `${m.member}:${m.line} (relative)` : m.member);
+        } else if (m.line != null) {
+          parts.push(`Line ${m.line} (absolute)`);
+        }
+        if (m.attrline != null) {
+          parts.push(`attr line ${m.attrline} (relative)`);
+        }
+        const locSuffix = parts.length > 0 ? ` *(${parts.join('  ·  ')})*` : '';
+        md.appendMarkdown(`$(triangle-right) \`${m.text.trim()}\`${locSuffix}\n\n`);
+      }
+      if (result.matches.length > 5) {
+        md.appendMarkdown(`*… and ${result.matches.length - 5} more*`);
+      }
+    }
+
+    this.tooltip = md;
+
     this.contextValue = 'searchFile';
     this.command = {
       command: 'objectscriptSearch.openFile',
@@ -86,7 +128,9 @@ export class MatchItem extends vscode.TreeItem {
       'search-result',
       new vscode.ThemeColor('editor.findMatchHighlightBackground'),
     );
-    this.tooltip = text;
+    // tooltip is intentionally left undefined so resolveTreeItem can build it
+    // lazily (including the calculated absolute line number for in-member matches)
+
     this.contextValue = 'searchMatch';
     this.command = {
       command: 'objectscriptSearch.openFile',
@@ -116,6 +160,8 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
   private _results: ISearchResult[] = [];
+  /** Last connection used for a search — kept internally to resolve absolute lines in tooltips. */
+  private _lastConn?: IConnection;
   private _configWatcher?: vscode.Disposable;
   private _cts?: vscode.CancellationTokenSource;     // #1 cancel in-flight search
   private _statusBar!: vscode.StatusBarItem;          // #3 status bar item
@@ -184,6 +230,70 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     return [];
   }
 
+  /**
+   * Called lazily by VS Code when the tooltip is about to be shown (tooltip must be undefined
+   * in the tree item for this to trigger). Builds the full MatchItem tooltip and, when the match
+   * is inside a class member, fetches the document to compute the absolute line number.
+   */
+  async resolveTreeItem(
+    item: vscode.TreeItem,
+    element: SearchNode,
+    token: vscode.CancellationToken,
+  ): Promise<vscode.TreeItem> {
+    if (!(element instanceof MatchItem)) { return item; }
+    const { match, result } = element;
+
+    const md = new vscode.MarkdownString('', true);
+    md.isTrusted = true;
+    md.appendMarkdown(`$(file-code) **${result.name}**\n\n`);
+    if (match.member) {
+      md.appendMarkdown(`$(symbol-method) Member: \`${match.member}\`\n\n`);
+    }
+    if (match.attr) {
+      md.appendMarkdown(`$(tag) Attribute: \`${match.attr}\`\n\n`);
+    }
+    if (match.line != null) {
+      if (match.member) {
+        md.appendMarkdown(`$(list-ordered) Line in member: **${match.line}** *(relative)*\n\n`);
+      } else {
+        md.appendMarkdown(`$(list-ordered) Line in document: **${match.line}** *(absolute)*\n\n`);
+      }
+    }
+    if (match.attrline != null) {
+      md.appendMarkdown(`$(list-ordered) Line in attribute: **${match.attrline}** *(relative)*\n\n`);
+    }
+
+    // When the match is inside a member, 'line' is relative — compute the absolute
+    // document line by fetching the document source and running the match resolver.
+    if (match.member != null) {
+      const conn = this._lastConn;
+      if (conn?.wsFolderName && !token.isCancellationRequested) {
+        try {
+          const uri = buildObjectScriptUri(result.name, conn.wsFolderName, conn.ns);
+          const textDoc = await vscode.workspace.openTextDocument(uri);
+          if (!token.isCancellationRequested) {
+            const content = textDoc.getText().split(/\r?\n/);
+            const multilineMethodArgs = vscode.workspace
+              .getConfiguration('objectscript')
+              .get<boolean>('multilineMethodArgs', false);
+            const resolvedLine = resolveMatchLine(content, match, result.name, multilineMethodArgs);
+            if (resolvedLine !== null) {
+              // resolvedLine is 0-based; display as 1-based
+              md.appendMarkdown(`$(list-ordered) Line in document: **${resolvedLine + 1}** *(absolute, calculated)*\n\n`);
+            }
+          }
+        } catch {
+          // ignore — tooltip will simply not include the calculated absolute line
+        }
+      }
+    }
+
+    md.appendMarkdown(`---\n\n`);
+    md.appendCodeblock(match.text.trim(), 'objectscript');
+    item.tooltip = md;
+    return item;
+  }
+
   // ── Public commands ───────────────────────────────────────────────────────
 
   async search(): Promise<void> {
@@ -216,6 +326,7 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     const query = await this._showSearchPicker(conn);
     if (!query) { return; }
     this._lastQuery = query;
+    this._lastConn = conn;
 
     // Persist history (#4)
     this._history = [query, ...this._history.filter(h => h !== query)].slice(0, 20);
