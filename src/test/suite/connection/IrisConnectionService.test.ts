@@ -403,4 +403,47 @@ suite('IrisConnectionService > getConnection', () => {
     const result = await getConnection();
     assert.strictEqual(result?.host, 'fallbackHost');
   });
+
+  // ── docker-compose / webgateway ───────────────────────────────────────────
+
+  // Regression: When objectscript.conn uses only `docker-compose` (webgateway
+  // service that exposes port 80 but NOT the superserver port 1972),
+  // asyncServerForUri skips its own docker resolution because it requires BOTH
+  // dockerPort and dockerSuperserverPort to be truthy.  After vscode-objectscript's
+  // own checkConnection runs it stores host/port in workspaceState, so subsequent
+  // asyncServerForUri calls return the resolved values directly.  Our code must
+  // correctly accept such a result.
+  test('detects docker-compose webgateway connection resolved via workspaceState', async () => {
+    // Simulates the state AFTER vscode-objectscript's checkConnection has run:
+    // asyncServerForUri returns the resolved host/port (read from workspaceState)
+    // without needing to do docker resolution itself.
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({
+        host: 'localhost',
+        port: 9092,  // mapped docker port for internalPort 80
+        scheme: 'http',
+        namespace: 'USER',
+        username: '_SYSTEM',
+        password: 'SYS',
+      }),
+    });
+
+    const result = await getConnection();
+    assert.ok(result !== undefined, 'should detect the connection');
+    assert.strictEqual(result!.host, 'localhost');
+    assert.strictEqual(result!.port, 9092);
+    assert.strictEqual(result!.ns, 'USER');
+  });
+
+  test('returns undefined when asyncServerForUri returns empty host (docker not yet resolved)', async () => {
+    // Simulates the transient state where asyncServerForUri returns active:true
+    // but empty host/port because workspaceState hasn't been populated yet and
+    // portFromDockerCompose couldn't set the port (superserverPort is null for
+    // webgateway-only services).
+    setupEnv(sandbox, {
+      serverInfo: makeServerInfo({ host: '', port: 0 }),
+    });
+
+    assert.strictEqual(await getConnection(), undefined);
+  });
 });

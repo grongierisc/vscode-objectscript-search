@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import type { ISearchResult, ISearchMatch, DocCategory, IConnection } from '../types';
-import { getConnection, getAllConnections, NO_CONNECTION_MSG } from '../connection/IrisConnectionService';
+import { getConnection, getAllConnections, NO_CONNECTION_MSG, onDidChangeObjectScriptConnection } from '../connection/IrisConnectionService';
 import { SearchService } from './SearchService';
 import { buildObjectScriptUri } from '../utils/uri';
 import { resolveMatchLine } from '../utils/matchResolver';
@@ -205,6 +205,17 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     });
     this._configWatcher = watcher;
     this._context.subscriptions.push(watcher);
+
+    // Also re-check whenever vscode-objectscript itself changes the connection
+    // (e.g. after it resolves a docker-compose port into workspaceState).
+    // This event fires independently of settings changes, so onDidChangeConfiguration
+    // alone would miss docker-compose reconnects where conn.active stays true.
+    const connChangeDisposable = onDidChangeObjectScriptConnection(() => {
+      this._checkConnectionStatus();
+    });
+    if (connChangeDisposable) {
+      this._context.subscriptions.push(connChangeDisposable);
+    }
   }
 
   dispose(): void {

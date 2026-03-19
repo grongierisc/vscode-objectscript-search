@@ -22,6 +22,8 @@ interface ObjectScriptExtAPI {
     password?: string;
     namespace: string;
   }>;
+  /** Fires whenever the active connection changes (e.g. docker-compose port resolved, reconnect). */
+  onDidChangeConnection(): vscode.Event<void>;
 }
 
 /**
@@ -158,4 +160,24 @@ export async function getAllConnections(): Promise<IConnection[]> {
   }
 
   return connections;
+}
+
+/**
+ * Subscribes to the vscode-objectscript `onDidChangeConnection` event, which
+ * fires after the extension resolves or changes a connection (including after
+ * docker-compose port resolution has populated workspaceState).
+ *
+ * Returns the disposable subscription, or `undefined` if the event is not
+ * available (extension not installed / API version too old).
+ */
+export function onDidChangeObjectScriptConnection(
+  listener: () => void,
+): vscode.Disposable | undefined {
+  const ext = vscode.extensions.getExtension<ObjectScriptExtAPI>(OBJECTSCRIPT_EXT_ID);
+  if (!ext?.isActive) { return undefined; }
+
+  const api = ext.exports;
+  if (typeof api?.onDidChangeConnection !== 'function') { return undefined; }
+
+  return api.onDidChangeConnection()(listener);
 }
