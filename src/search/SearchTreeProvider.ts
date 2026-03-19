@@ -377,6 +377,12 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
             (_batch, _si, tf, tm) => {
               if (token.isCancellationRequested) { return; }
               this._results.push(..._batch);
+              // Sort so the document whose name matches the query appears first.
+              // Inspired by vscode-objectscript TextSearchProvider: when match.text == fileName
+              // the match is treated as the "routine header" and placed at line 0.
+              // We apply the same idea at the file level: exact name match → rank 0,
+              // name starts/ends with query → rank 1, everything else → rank 2.
+              this._results.sort((a, b) => this._rankResult(a, query) - this._rankResult(b, query));
               totalFiles   = tf;
               totalMatches = tm;
               this._onDidChangeTreeData.fire();
@@ -578,6 +584,22 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
 
       qp.show();
     });
+  }
+
+  /**
+   * Returns a sort rank for a result relative to the current query.
+   * Lower is better: exact name match (strip extension) → 0,
+   * name starts or ends with the query → 1, anything else → 2.
+   * Within the same rank the original server-returned order is preserved
+   * because Array.prototype.sort is stable.
+   */
+  private _rankResult(result: ISearchResult, query: string): number {
+    if (!query) { return 2; }
+    const lower      = query.toLowerCase();
+    const nameNoExt  = result.name.replace(/\.[^.]+$/, '').toLowerCase();
+    if (nameNoExt === lower)                                  { return 0; }
+    if (nameNoExt.startsWith(lower) || nameNoExt.endsWith(lower)) { return 1; }
+    return 2;
   }
 
   private async _checkConnectionStatus(): Promise<void> {
