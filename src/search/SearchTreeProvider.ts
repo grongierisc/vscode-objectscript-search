@@ -536,7 +536,15 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
 
       qp.onDidAccept(() => {
         const [active] = qp.activeItems;
-        // Toggle option — keep picker open, refresh option items
+        // If the user has typed something, pressing Enter always runs the search —
+        // even if a toggle/option row happens to be highlighted in the list.
+        if (qp.value.trim()) {
+          qp.hide();
+          done(qp.value.trim());
+          return;
+        }
+        // No typed query: handle the highlighted item.
+        // Toggle option — keep picker open, refresh option items.
         if (active?._kind === 'toggle') {
           if      (active._opt === 'cas') { this._matchCase = !this._matchCase; void this._context.workspaceState.update('osc.matchCase', this._matchCase); }
           else if (active._opt === 'wrd') { this._matchWord = !this._matchWord; void this._context.workspaceState.update('osc.matchWord', this._matchWord); }
@@ -548,7 +556,7 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
         if (active?._kind === 'history') {
           done(active._query);
         } else {
-          done(qp.value.trim() || undefined);
+          done(undefined);
         }
       });
 
