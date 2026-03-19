@@ -42,7 +42,7 @@
     "viewsWelcome": [
       {
         "view": "ObjectScriptSearch",
-        "contents": "No active ObjectScript connection.\n\nOpen a workspace folder and ensure `objectscript.conn` is configured.\n[Open Workspace Settings](command:workbench.action.openWorkspaceSettings)",
+        "contents": "No active ObjectScript connection.\n\nOpen a workspace folder and ensure `objectscript.conn` is configured.\n[Open Connection Settings](command:objectscriptSearch.openConnectionSettings)",
         "when": "!objectscriptSearch.connected"
       },
       {
@@ -52,6 +52,11 @@
       }
     ],
     "commands": [
+      {
+        "command": "objectscriptSearch.openConnectionSettings",
+        "title": "Open Connection Settings",
+        "category": "ObjectScript"
+      },
       {
         "command": "objectscriptSearch.search",
         "title": "Search…",
