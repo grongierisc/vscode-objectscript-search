@@ -352,9 +352,11 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     this._onDidChangeTreeData.fire();
 
     // #3 Status bar: searching…
-    this._statusBar.text    = `$(loading~spin) "${query}"`;
-    this._statusBar.tooltip = `Searching IRIS for "${query}"…`;
+    this._statusBar.text      = `$(loading~spin) "${query}"`;
+    this._statusBar.tooltip   = `Searching IRIS for "${query}"… — click to stop`;
+    this._statusBar.command   = 'objectscriptSearch.stopSearch';
     this._statusBar.show();
+    void vscode.commands.executeCommand('setContext', 'objectscriptSearch.searching', true);
 
     let totalFiles   = 0;
     let totalMatches = 0;
@@ -392,12 +394,21 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     );
 
     // #3 Status bar: result summary
-    if (!token.isCancellationRequested) {
+    void vscode.commands.executeCommand('setContext', 'objectscriptSearch.searching', false);
+    this._statusBar.command = 'objectscriptSearch.search';
+    if (token.isCancellationRequested) {
+      this._statusBar.text    = `$(search) "${query}" — stopped`;
+      this._statusBar.tooltip = 'Search stopped — click to run a new search';
+    } else {
       this._statusBar.text = totalFiles === 0
         ? `$(search) "${query}" — no results`
         : `$(search) "${query}" — ${totalMatches} match${totalMatches === 1 ? '' : 'es'} in ${totalFiles} file${totalFiles === 1 ? '' : 's'}`;
       this._statusBar.tooltip = 'Click to run a new search';
     }
+  }
+
+  stopSearch(): void {
+    this._cts?.cancel();
   }
 
   clearResults(): void {

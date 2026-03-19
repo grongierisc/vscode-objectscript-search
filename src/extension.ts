@@ -57,6 +57,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.window.registerTreeDataProvider(SearchTreeProvider.viewType, provider),
     vscode.commands.registerCommand('objectscriptSearch.search',      () => provider.search()),
     vscode.commands.registerCommand('objectscriptSearch.showOptions',  () => provider.showOptions()),
+    vscode.commands.registerCommand('objectscriptSearch.stopSearch',   () => provider.stopSearch()),
     vscode.commands.registerCommand('objectscriptSearch.clearResults', () => provider.clearResults()),
     vscode.commands.registerCommand('objectscriptSearch.copyResults',  () => provider.copyResults()),
     vscode.commands.registerCommand('objectscriptSearch.openConnectionSettings', openConnectionSettings),

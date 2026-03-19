@@ -70,6 +70,12 @@
         "category": "ObjectScript"
       },
       {
+        "command": "objectscriptSearch.stopSearch",
+        "title": "Stop Search",
+        "icon": "$(debug-stop)",
+        "category": "ObjectScript"
+      },
+      {
         "command": "objectscriptSearch.clearResults",
         "title": "Clear Results",
         "icon": "$(clear-all)",
@@ -86,7 +92,12 @@
       "view/title": [
         {
           "command": "objectscriptSearch.search",
-          "when": "view == ObjectScriptSearch && objectscriptSearch.connected",
+          "when": "view == ObjectScriptSearch && objectscriptSearch.connected && !objectscriptSearch.searching",
+          "group": "navigation@1"
+        },
+        {
+          "command": "objectscriptSearch.stopSearch",
+          "when": "view == ObjectScriptSearch && objectscriptSearch.searching",
           "group": "navigation@1"
         },
         {
