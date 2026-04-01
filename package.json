@@ -2,7 +2,7 @@
   "name": "vscode-objectscript-search",
   "displayName": "ObjectScript Search",
   "description": "Server-side search for InterSystems IRIS ObjectScript code",
-  "version": "0.1.7-beta.1",
+  "version": "0.1.7",
   "publisher": "grongierisc",
   "license": "MIT",
   "repository": {
