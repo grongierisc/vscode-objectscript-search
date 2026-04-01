@@ -47,7 +47,7 @@
       },
       {
         "view": "ObjectScriptSearch",
-        "contents": "$(search) [Click to search…](command:objectscriptSearch.search)\n\nUse [Options…](command:objectscriptSearch.showOptions) to configure file types and match behaviour.",
+        "contents": "$(search) [Click to search…](command:objectscriptSearch.search) on server side.\n\n$(server-environment) [Select namespace…](command:objectscriptSearch.selectNamespace) to target a specific IRIS namespace.\n\n$(filter) [Options…](command:objectscriptSearch.showOptions) to configure file types and match behaviour.",
         "when": "objectscriptSearch.connected"
       }
     ],
@@ -86,6 +86,12 @@
         "title": "Copy Results",
         "icon": "$(copy)",
         "category": "ObjectScript"
+      },
+      {
+        "command": "objectscriptSearch.selectNamespace",
+        "title": "Select Namespace…",
+        "icon": "$(server-environment)",
+        "category": "ObjectScript"
       }
     ],
     "menus": {
@@ -101,19 +107,24 @@
           "group": "navigation@1"
         },
         {
-          "command": "objectscriptSearch.showOptions",
-          "when": "view == ObjectScriptSearch",
+          "command": "objectscriptSearch.selectNamespace",
+          "when": "view == ObjectScriptSearch && objectscriptSearch.connected",
           "group": "navigation@2"
         },
         {
-          "command": "objectscriptSearch.clearResults",
+          "command": "objectscriptSearch.showOptions",
           "when": "view == ObjectScriptSearch",
           "group": "navigation@3"
         },
         {
-          "command": "objectscriptSearch.copyResults",
+          "command": "objectscriptSearch.clearResults",
           "when": "view == ObjectScriptSearch",
           "group": "navigation@4"
+        },
+        {
+          "command": "objectscriptSearch.copyResults",
+          "when": "view == ObjectScriptSearch",
+          "group": "navigation@5"
         }
       ]
     },

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import type { ISearchResult, ISearchMatch, DocCategory, IConnection } from '../types';
 import { getConnection, getAllConnections, NO_CONNECTION_MSG, onDidChangeObjectScriptConnection } from '../connection/IrisConnectionService';
+import { AtelierAPI } from '../atelier';
 import { SearchService } from './SearchService';
 import { buildObjectScriptUri } from '../utils/uri';
 import { resolveMatchLine } from '../utils/matchResolver';
@@ -162,6 +163,8 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
   private _results: ISearchResult[] = [];
   /** Last connection used for a search — kept internally to resolve absolute lines in tooltips. */
   private _lastConn?: IConnection;
+  /** Explicitly selected connection + namespace (set via the Select Namespace toolbar icon). */
+  private _activeConn?: IConnection;
   private _configWatcher?: vscode.Disposable;
   private _cts?: vscode.CancellationTokenSource;     // #1 cancel in-flight search
   private _statusBar!: vscode.StatusBarItem;          // #3 status bar item
@@ -307,30 +310,37 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
 
   // ── Public commands ───────────────────────────────────────────────────────
 
-  async search(): Promise<void> {
-    // #5 Namespace picker — collect all active connections
-    const allConns = await getAllConnections();
-    if (allConns.length === 0) {
-      vscode.window.showWarningMessage(NO_CONNECTION_MSG);
-      return;
-    }
+  /**
+   * Toolbar icon: lets the user pick a connection and namespace explicitly.
+   * The selection is stored as `_activeConn` and reused by all subsequent
+   * searches until changed again.
+   */
+  async selectNamespace(): Promise<void> {
+    const conn = await this._pickConnectionAndNamespace();
+    if (!conn) { return; }
+    this._activeConn = conn;
+    vscode.window.showInformationMessage(
+      `ObjectScript Search: namespace set to ${conn.serverName ?? conn.host} › ${conn.ns}`,
+    );
+  }
 
-    let conn: IConnection;
-    if (allConns.length === 1) {
-      conn = allConns[0];
-    } else {
-      type ConnItem = vscode.QuickPickItem & { _conn: IConnection };
-      const pick = await vscode.window.showQuickPick<ConnItem>(
-        allConns.map(c => ({
-          label:       c.serverName ?? c.host,
-          description: c.ns,
-          detail:      c.wsFolderName,
-          _conn:       c,
-        })),
-        { title: 'Select IRIS Namespace', placeHolder: 'Pick a connection…' },
-      );
-      if (!pick) { return; }
-      conn = pick._conn;
+  async search(): Promise<void> {
+    // Use the explicitly selected connection when available; otherwise resolve automatically.
+    let conn: IConnection | undefined = this._activeConn;
+
+    if (!conn) {
+      const allConns = await getAllConnections();
+      if (allConns.length === 0) {
+        vscode.window.showWarningMessage(NO_CONNECTION_MSG);
+        return;
+      }
+      if (allConns.length === 1) {
+        conn = allConns[0];
+      } else {
+        conn = await this._pickConnectionAndNamespace();
+        if (!conn) { return; }
+        this._activeConn = conn;
+      }
     }
 
     const query = await this._showSearchPicker(conn);
@@ -488,6 +498,62 @@ export class SearchTreeProvider implements vscode.TreeDataProvider<SearchNode>, 
     vscode.window.showInformationMessage(
       `Copied ${this._results.length} file${this._results.length === 1 ? '' : 's'} to clipboard.`,
     );
+  }
+
+  /**
+   * Prompts the user to choose a connection (when multiple are active) and then
+   * a namespace from that server. Returns the resolved `IConnection` with the
+   * selected namespace, or `undefined` if the user cancelled.
+   */
+  private async _pickConnectionAndNamespace(): Promise<IConnection | undefined> {
+    const allConns = await getAllConnections();
+    if (allConns.length === 0) {
+      vscode.window.showWarningMessage(NO_CONNECTION_MSG);
+      return undefined;
+    }
+
+    let conn: IConnection;
+    if (allConns.length === 1) {
+      conn = allConns[0];
+    } else {
+      type ConnItem = vscode.QuickPickItem & { _conn: IConnection };
+      const pick = await vscode.window.showQuickPick<ConnItem>(
+        allConns.map(c => ({
+          label:       c.serverName ?? c.host,
+          description: c.ns,
+          detail:      c.wsFolderName,
+          _conn:       c,
+        })),
+        { title: 'Select IRIS Connection', placeHolder: 'Pick a connection…' },
+      );
+      if (!pick) { return undefined; }
+      conn = pick._conn;
+    }
+
+    // Fetch available namespaces from the server.
+    const api = new AtelierAPI(conn);
+    const availableNs = await api.serverInfo()
+      .then(r => (r.result as { content: { namespaces?: string[] } }).content.namespaces ?? [])
+      .catch(() => [] as string[]);
+
+    if (availableNs.length <= 1) {
+      return conn;
+    }
+
+    type NsItem = vscode.QuickPickItem & { _ns: string };
+    const nsPick = await vscode.window.showQuickPick<NsItem>(
+      availableNs.map(ns => ({
+        label:       ns,
+        description: ns.toUpperCase() === conn.ns ? '(current)' : undefined,
+        _ns:         ns,
+      })),
+      { title: `Select Namespace — ${conn.serverName ?? conn.host}`, placeHolder: 'Pick a namespace…' },
+    );
+    if (!nsPick) { return undefined; }
+
+    return nsPick._ns.toUpperCase() === conn.ns
+      ? conn
+      : { ...conn, ns: nsPick._ns.toUpperCase() };
   }
 
   /**

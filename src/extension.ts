@@ -55,8 +55,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     provider,
     vscode.window.registerTreeDataProvider(SearchTreeProvider.viewType, provider),
-    vscode.commands.registerCommand('objectscriptSearch.search',      () => provider.search()),
-    vscode.commands.registerCommand('objectscriptSearch.showOptions',  () => provider.showOptions()),
+    vscode.commands.registerCommand('objectscriptSearch.search',           () => provider.search()),
+    vscode.commands.registerCommand('objectscriptSearch.selectNamespace',  () => provider.selectNamespace()),
+    vscode.commands.registerCommand('objectscriptSearch.showOptions',       () => provider.showOptions()),
     vscode.commands.registerCommand('objectscriptSearch.stopSearch',   () => provider.stopSearch()),
     vscode.commands.registerCommand('objectscriptSearch.clearResults', () => provider.clearResults()),
     vscode.commands.registerCommand('objectscriptSearch.copyResults',  () => provider.copyResults()),
